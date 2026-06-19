@@ -2292,12 +2292,68 @@ with tab_finance:
     st.write("---")
     
     # Grid điều chỉnh thu chi
-    subtab_exp, subtab_inc, subtab_set = st.tabs(["💸 Các khoản CHI (Expenses)", "📥 Các khoản THU (Incomes)", "📊 Bảng Quyết Toán Tài Chính"])
+    subtab_input, subtab_set = st.tabs(["💸 Quản lý Thu - Chi", "📊 Bảng Quyết Toán Tài Chính"])
     
-    with subtab_exp:
-        st.subheader("Điều chỉnh chi tiết các khoản chi")
+    with subtab_input:
+        # =========================================================
+        # 1. PHẦN CHI (EXPENSES)
+        # =========================================================
+        st.markdown("### 1. Phần chi")
+        
+        # Hàng ngang nhập liệu cho khoản chi
+        col_e1, col_e2, col_e3, col_e4, col_e5, col_e6 = st.columns([1.2, 1.5, 1.5, 1.5, 1.5, 1.2])
+        with col_e1:
+            new_exp_date = st.date_input("Ngày chi", value=datetime.now(), key="new_exp_date_input")
+        with col_e2:
+            new_exp_type = st.selectbox("Loại chi", options=EXPENSE_TYPES, index=0, key="new_exp_type_select")
+        with col_e3:
+            new_exp_amount = st.number_input("Số tiền chi", min_value=0, step=5000, value=0, key="new_exp_amount_input")
+        with col_e4:
+            new_exp_payer = st.selectbox("Người chi", options=["Quỹ"] + players_list, index=0, key="new_exp_payer_select")
+        with col_e5:
+            with st.popover("👥 Người tham gia", use_container_width=True):
+                new_exp_parts = st.multiselect("Chọn hội viên:", options=["All"] + players_list, default=["All"], key="new_exp_parts_select")
+                new_exp_guest_text = st.text_input("Người ngoài (dấu phẩy):", placeholder="Anh Nam, Anh Hải...", key="new_exp_guest_input")
+                new_exp_note = st.text_input("Ghi chú chi:", placeholder="Ghi chú chi...", key="new_exp_note_input")
+        with col_e6:
+            st.write("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            add_exp_clicked = st.button("Thêm chi", type="primary", use_container_width=True, key="new_exp_add_btn")
+            
+        if add_exp_clicked:
+            if new_exp_amount <= 0:
+                st.error("Vui lòng nhập số tiền chi lớn hơn 0!")
+            else:
+                participants = list(new_exp_parts)
+                guest_names = [x.strip() for x in new_exp_guest_text.replace(";", ",").split(",") if x.strip()]
+                if "All" in participants:
+                    participants = ["All"] + guest_names
+                else:
+                    participants = participants + guest_names
+                participants = list(dict.fromkeys([p for p in participants if str(p).strip()]))
+                if not participants:
+                    participants = ["All"]
+                    
+                expense_date_str = new_exp_date.strftime("%Y-%m-%d")
+                month_str = expense_date_str[:7]
+                
+                cur = db.conn.cursor()
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO finance_expenses (month, expense_date, expense_type, amount, participants, payer, note)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (month_str, expense_date_str, new_exp_type, new_exp_amount, json.dumps(participants, ensure_ascii=False), new_exp_payer, new_exp_note)
+                    )
+                    db.conn.commit()
+                    st.success("Đã thêm khoản chi thành công!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Lỗi: {e}")
+
+        # Hiển thị bảng chi
         if not expenses_list:
-            st.info("💡 Chưa có khoản chi nào trong kỳ này. Bấm nút '+' ở bảng dưới để thêm khoản chi mới.")
+            st.info("💡 Chưa có khoản chi nào trong kỳ này. Nhập các trường trên và bấm 'Thêm chi' để bắt đầu.")
             df_expenses = pd.DataFrame(columns=["ID", "Ngày chi", "Loại chi phí", "Số tiền (đ)", "Người tham gia", "Người trả", "Ghi chú"])
         else:
             df_expenses = pd.DataFrame(expenses_list, columns=["ID", "Ngày chi", "Loại chi phí", "Số tiền (đ)", "Người tham gia", "Người trả", "Ghi chú"])
@@ -2326,11 +2382,55 @@ with tab_finance:
                 st.rerun()
             else:
                 st.error(msg)
+                
+        st.write("---")
 
-    with subtab_inc:
-        st.subheader("Điều chỉnh chi tiết các khoản thu")
+        # =========================================================
+        # 2. PHẦN THU (INCOMES)
+        # =========================================================
+        st.markdown("### 2. Phần thu")
+        
+        # Hàng ngang nhập liệu cho khoản thu
+        col_i1, col_i2, col_i3, col_i4, col_i5, col_i6 = st.columns([1.2, 1.5, 1.5, 1.5, 1.5, 1.2])
+        with col_i1:
+            new_inc_date = st.date_input("Ngày thu", value=datetime.now(), key="new_inc_date_input")
+        with col_i2:
+            new_inc_type = st.selectbox("Loại thu", options=DEFAULT_INCOME_TYPES, index=0, key="new_inc_type_select")
+        with col_i3:
+            new_inc_amount = st.number_input("Số tiền thu", min_value=0, step=5000, value=0, key="new_inc_amount_input")
+        with col_i4:
+            new_inc_collector = st.selectbox("Người thu", options=["Quỹ"] + players_list, index=0, key="new_inc_collector_select")
+        with col_i5:
+            new_inc_note = st.text_input("Ghi chú thu", placeholder="Nhập ghi chú...", key="new_inc_note_input")
+        with col_i6:
+            st.write("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            add_inc_clicked = st.button("Thêm thu", type="primary", use_container_width=True, key="new_inc_add_btn")
+            
+        if add_inc_clicked:
+            if new_inc_amount <= 0:
+                st.error("Vui lòng nhập số tiền thu lớn hơn 0!")
+            else:
+                income_date_str = new_inc_date.strftime("%Y-%m-%d")
+                month_str = income_date_str[:7]
+                
+                cur = db.conn.cursor()
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO finance_incomes (month, income_date, income_type, amount, collector, note)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (month_str, income_date_str, new_inc_type, new_inc_amount, new_inc_collector, new_inc_note)
+                    )
+                    db.conn.commit()
+                    st.success("Đã thêm khoản thu thành công!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Lỗi: {e}")
+
+        # Hiển thị bảng thu
         if not incomes_list:
-            st.info("💡 Chưa có khoản thu nào trong kỳ này. Bấm nút '+' ở bảng dưới để thêm khoản thu mới.")
+            st.info("💡 Chưa có khoản thu nào trong kỳ này. Nhập các trường trên và bấm 'Thêm thu' để bắt đầu.")
             df_incomes = pd.DataFrame(columns=["ID", "Ngày thu", "Loại khoản thu", "Số tiền (đ)", "Người thu", "Ghi chú"])
         else:
             df_incomes = pd.DataFrame(incomes_list, columns=["ID", "Ngày thu", "Loại khoản thu", "Số tiền (đ)", "Người thu", "Ghi chú"])
