@@ -1419,8 +1419,7 @@ selected_db = st.sidebar.selectbox(
     index=sorted(local_files).index(DEFAULT_DB_FILE) if DEFAULT_DB_FILE in local_files else 0
 )
 
-# Khởi tạo db kết nối (cached)
-@st.cache_resource
+# Khởi tạo db kết nối
 def get_db(db_path):
     return TennisDB(db_path)
 
