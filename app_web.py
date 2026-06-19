@@ -171,7 +171,29 @@ def save_db_to_github(db_path_str, github_filename):
         return False, f"Lỗi kết nối GitHub: {e}"
 
 
-def load_db_from_github(db_path_str):
+def list_files_on_github():
+    if "GITHUB_TOKEN" not in st.secrets or "GITHUB_REPO" not in st.secrets:
+        return []
+    token = st.secrets["GITHUB_TOKEN"]
+    repo = st.secrets["GITHUB_REPO"]
+    branch = st.secrets.get("GITHUB_BRANCH", "main")
+    
+    url = f"https://api.github.com/repos/{repo}/contents/?ref={branch}"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    try:
+        r = requests.get(url, headers=headers)
+        if r.status_code == 200:
+            files = r.json()
+            return [f["name"] for f in files if f["type"] == "file" and f["name"].endswith(".tennis")]
+    except Exception:
+        pass
+    return []
+
+
+def load_db_from_github(github_filename, local_filename):
     if "GITHUB_TOKEN" not in st.secrets or "GITHUB_REPO" not in st.secrets:
         return False, "Chưa cấu hình GITHUB_TOKEN hoặc GITHUB_REPO trong Streamlit Secrets."
         
@@ -179,7 +201,7 @@ def load_db_from_github(db_path_str):
     repo = st.secrets["GITHUB_REPO"]
     branch = st.secrets.get("GITHUB_BRANCH", "main")
     
-    path = db_path_str
+    path = github_filename
     url = f"https://api.github.com/repos/{repo}/contents/{path}?ref={branch}"
     headers = {
         "Authorization": f"token {token}",
@@ -189,9 +211,9 @@ def load_db_from_github(db_path_str):
     try:
         r = requests.get(url, headers=headers)
         if r.status_code == 200:
-            with open(db_path_str, "wb") as f:
+            with open(local_filename, "wb") as f:
                 f.write(r.content)
-            return True, f"Đã tải thành công file `{db_path_str}` từ GitHub về ứng dụng!"
+            return True, f"Đã tải thành công file `{github_filename}` từ GitHub về và lưu thành `{local_filename}`!"
         else:
             return False, f"Lỗi GitHub API ({r.status_code}): {r.text}"
             
@@ -1677,14 +1699,7 @@ st.markdown(
 # --- KIỂM TRA ĐĂNG NHẬP ---
 def get_cookies():
     try:
-        cookie_header = st.context.headers.get("Cookie", "")
-        cookies = {}
-        for item in cookie_header.split(";"):
-            item = item.strip()
-            if "=" in item:
-                k, v = item.split("=", 1)
-                cookies[k.strip()] = v.strip()
-        return cookies
+        return st.context.cookies
     except Exception:
         return {}
 
@@ -1694,7 +1709,12 @@ if st.session_state.get("delete_login_cookie"):
     components.html(
         """
         <script>
-            parent.document.cookie = "tennis_logged_in=; max-age=0; path=/";
+            try {
+                parent.document.cookie = "tennis_logged_in=; max-age=0; path=/; SameSite=Lax";
+            } catch(e){}
+            try {
+                document.cookie = "tennis_logged_in=; max-age=0; path=/; SameSite=Lax";
+            } catch(e){}
         </script>
         """,
         height=0
@@ -1707,7 +1727,12 @@ if st.session_state.get("write_login_cookie"):
     components.html(
         """
         <script>
-            parent.document.cookie = "tennis_logged_in=true; max-age=2592000; path=/";
+            try {
+                parent.document.cookie = "tennis_logged_in=true; max-age=2592000; path=/; SameSite=Lax";
+            } catch(e){}
+            try {
+                document.cookie = "tennis_logged_in=true; max-age=2592000; path=/; SameSite=Lax";
+            } catch(e){}
         </script>
         """,
         height=0
@@ -1886,14 +1911,49 @@ if "GITHUB_TOKEN" in st.secrets and "GITHUB_REPO" in st.secrets:
                         else:
                             st.error(msg)
     with col_git2:
-        if st.button("☁️ Tải từ GitHub", use_container_width=True, key="sync_pull_btn"):
-            with st.spinner("Đang tải về..."):
-                success, msg = load_db_from_github(selected_db)
-                if success:
-                    st.success(msg)
-                    st.rerun()
+        with st.popover("☁️ Tải từ GitHub", use_container_width=True):
+            if "github_files" not in st.session_state:
+                st.session_state["github_files"] = []
+                
+            if st.button("🔄 Lấy danh sách file", key="refresh_gh_files_btn", use_container_width=True):
+                with st.spinner("Đang lấy danh sách..."):
+                    files = list_files_on_github()
+                    if files:
+                        st.session_state["github_files"] = files
+                        st.success(f"Đã tìm thấy {len(files)} file!")
+                    else:
+                        st.warning("Không tìm thấy file nào hoặc lỗi kết nối!")
+            
+            if st.session_state["github_files"]:
+                github_selected_file = st.selectbox(
+                    "Chọn file trên GitHub:",
+                    options=st.session_state["github_files"],
+                    key="gh_pull_select"
+                )
+            else:
+                github_selected_file = st.text_input(
+                    "Nhập tên file trên GitHub:",
+                    value=selected_db,
+                    key="gh_pull_text"
+                )
+                
+            local_save_name = st.text_input(
+                "Lưu thành file local:",
+                value=github_selected_file if github_selected_file else selected_db,
+                key="gh_pull_local_name"
+            )
+            
+            if st.button("Xác nhận Tải", type="primary", use_container_width=True, key="gh_pull_confirm_btn"):
+                if not github_selected_file.strip() or not local_save_name.strip():
+                    st.error("Tên file không được để trống!")
                 else:
-                    st.error(msg)
+                    with st.spinner("Đang tải..."):
+                        success, msg = load_db_from_github(github_selected_file.strip(), local_save_name.strip())
+                        if success:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
 else:
     with st.sidebar.expander("☁️ Đồng bộ GitHub (Đám mây)"):
         st.info(
