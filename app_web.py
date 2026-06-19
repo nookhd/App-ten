@@ -1157,9 +1157,10 @@ def export_excel_bytes(db, months):
         df_stats["total_points"] = df_stats["wins"] * db.get_rules()["point_win"] + df_stats["draws"] * db.get_rules()["point_draw"]
         df_stats = df_stats.sort_values(by=["total_points", "wins", "gf"], ascending=[False, False, False])
         df_stats.insert(0, "Hạng", range(1, len(df_stats) + 1))
+        df_stats = df_stats.drop(columns=["gf", "ga"], errors="ignore")
         df_stats = df_stats.rename(columns={
             "name": "Tên hội viên", "matches": "Trận", "wins": "Thắng", "draws": "Hòa", "losses": "Thua",
-            "gf": "Bàn thắng", "ga": "Bàn thua", "match_money": "Tiền trận", "bet_money": "Tiền độ",
+            "match_money": "Tiền trận", "bet_money": "Tiền độ",
             "money": "Tổng tiền", "total_points": "Điểm thành tích"
         })
     
@@ -1261,9 +1262,10 @@ def export_pdf_bytes(db, months):
         df_stats["total_points"] = df_stats["wins"] * db.get_rules()["point_win"] + df_stats["draws"] * db.get_rules()["point_draw"]
         df_stats = df_stats.sort_values(by=["total_points", "wins", "gf"], ascending=[False, False, False])
         df_stats.insert(0, "Hạng", range(1, len(df_stats) + 1))
+        df_stats = df_stats.drop(columns=["gf", "ga"], errors="ignore")
         df_stats = df_stats.rename(columns={
             "name": "Hội viên", "matches": "Trận", "wins": "T", "draws": "H", "losses": "B",
-            "gf": "BT", "ga": "BT", "match_money": "Phạt", "bet_money": "Độ", "money": "Tổng"
+            "match_money": "Phạt", "bet_money": "Độ", "money": "Tổng", "total_points": "Điểm"
         })
         
     rows, expenses, incomes, summary = calculate_finance_period(db, months)
@@ -2170,14 +2172,13 @@ with tab_rank:
         df_stats = df_stats.sort_values(by=["total_points", "wins", "gf"], ascending=[False, False, False])
         df_stats.insert(0, "Hạng", range(1, len(df_stats) + 1))
         
-        df_stats_display = df_stats.rename(columns={
+        df_stats_display = df_stats.drop(columns=["gf", "ga"], errors="ignore")
+        df_stats_display = df_stats_display.rename(columns={
             "name": "Tên hội viên",
             "matches": "Trận",
             "wins": "Thắng",
             "draws": "Hòa",
             "losses": "Thua",
-            "gf": "Bàn thắng",
-            "ga": "Bàn thua",
             "match_money": "Tiền trận",
             "bet_money": "Tiền độ",
             "money": "Tổng tiền",
@@ -2190,8 +2191,6 @@ with tab_rank:
                 "Thắng": st.column_config.NumberColumn("Thắng", format="%d"),
                 "Hòa": st.column_config.NumberColumn("Hòa", format="%d"),
                 "Thua": st.column_config.NumberColumn("Thua", format="%d"),
-                "Bàn thắng": st.column_config.NumberColumn("Bàn thắng", format="%d"),
-                "Bàn thua": st.column_config.NumberColumn("Bàn thua", format="%d"),
                 "Tiền trận": st.column_config.NumberColumn("Tiền trận", format="%,.0f đ"),
                 "Tiền độ": st.column_config.NumberColumn("Tiền độ", format="%,.0f đ"),
                 "Tổng tiền": st.column_config.NumberColumn("Tổng tiền", format="%,.0f đ"),
@@ -2297,65 +2296,67 @@ with tab_finance:
     
     with subtab_exp:
         st.subheader("Điều chỉnh chi tiết các khoản chi")
-        if expenses_list:
+        if not expenses_list:
+            st.info("💡 Chưa có khoản chi nào trong kỳ này. Bấm nút '+' ở bảng dưới để thêm khoản chi mới.")
+            df_expenses = pd.DataFrame(columns=["ID", "Ngày chi", "Loại chi phí", "Số tiền (đ)", "Người tham gia", "Người trả", "Ghi chú"])
+        else:
             df_expenses = pd.DataFrame(expenses_list, columns=["ID", "Ngày chi", "Loại chi phí", "Số tiền (đ)", "Người tham gia", "Người trả", "Ghi chú"])
             df_expenses["Người tham gia"] = df_expenses["Người tham gia"].apply(lambda x: ", ".join(load_json_list(x)) if "All" not in load_json_list(x) else "All")
             
-            edited_exp_df = st.data_editor(
-                df_expenses,
-                num_rows="dynamic",
-                key="expenses_editor",
-                column_config={
-                    "ID": st.column_config.NumberColumn("ID", disabled=True, format="%d"),
-                    "Ngày chi": st.column_config.TextColumn("Ngày chi"),
-                    "Loại chi phí": st.column_config.SelectboxColumn("Loại chi phí", options=EXPENSE_TYPES),
-                    "Số tiền (đ)": st.column_config.NumberColumn("Số tiền", format="%,.0f đ"),
-                    "Người tham gia": st.column_config.TextColumn("Người tham gia"),
-                    "Người trả": st.column_config.TextColumn("Người trả"),
-                    "Ghi chú": st.column_config.TextColumn("Ghi chú")
-                },
-                use_container_width=True
-            )
-            
-            if st.button("Lưu thay đổi khoản chi", type="primary", key="save_exp_btn"):
-                success, msg = save_editor_changes(db, "finance_expenses", "expenses_editor", df_expenses)
-                if success:
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
-        else:
-            st.info("Chưa phát sinh chi phí.")
+        edited_exp_df = st.data_editor(
+            df_expenses,
+            num_rows="dynamic",
+            key="expenses_editor",
+            column_config={
+                "ID": st.column_config.NumberColumn("ID", disabled=True, format="%d"),
+                "Ngày chi": st.column_config.TextColumn("Ngày chi"),
+                "Loại chi phí": st.column_config.SelectboxColumn("Loại chi phí", options=EXPENSE_TYPES),
+                "Số tiền (đ)": st.column_config.NumberColumn("Số tiền", format="%,.0f đ"),
+                "Người tham gia": st.column_config.TextColumn("Người tham gia"),
+                "Người trả": st.column_config.TextColumn("Người trả"),
+                "Ghi chú": st.column_config.TextColumn("Ghi chú")
+            },
+            use_container_width=True
+        )
+        
+        if st.button("Lưu thay đổi khoản chi", type="primary", key="save_exp_btn"):
+            success, msg = save_editor_changes(db, "finance_expenses", "expenses_editor", df_expenses)
+            if success:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
 
     with subtab_inc:
         st.subheader("Điều chỉnh chi tiết các khoản thu")
-        if incomes_list:
+        if not incomes_list:
+            st.info("💡 Chưa có khoản thu nào trong kỳ này. Bấm nút '+' ở bảng dưới để thêm khoản thu mới.")
+            df_incomes = pd.DataFrame(columns=["ID", "Ngày thu", "Loại khoản thu", "Số tiền (đ)", "Người thu", "Ghi chú"])
+        else:
             df_incomes = pd.DataFrame(incomes_list, columns=["ID", "Ngày thu", "Loại khoản thu", "Số tiền (đ)", "Người thu", "Ghi chú"])
             
-            edited_inc_df = st.data_editor(
-                df_incomes,
-                num_rows="dynamic",
-                key="incomes_editor",
-                column_config={
-                    "ID": st.column_config.NumberColumn("ID", disabled=True, format="%d"),
-                    "Ngày thu": st.column_config.TextColumn("Ngày thu"),
-                    "Loại khoản thu": st.column_config.SelectboxColumn("Loại khoản thu", options=DEFAULT_INCOME_TYPES),
-                    "Số tiền (đ)": st.column_config.NumberColumn("Số tiền", format="%,.0f đ"),
-                    "Người thu": st.column_config.TextColumn("Người thu"),
-                    "Ghi chú": st.column_config.TextColumn("Ghi chú")
-                },
-                use_container_width=True
-            )
-            
-            if st.button("Lưu thay đổi khoản thu", type="primary", key="save_inc_btn"):
-                success, msg = save_editor_changes(db, "finance_incomes", "incomes_editor", df_incomes)
-                if success:
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
-        else:
-            st.info("Chưa phát sinh khoản thu.")
+        edited_inc_df = st.data_editor(
+            df_incomes,
+            num_rows="dynamic",
+            key="incomes_editor",
+            column_config={
+                "ID": st.column_config.NumberColumn("ID", disabled=True, format="%d"),
+                "Ngày thu": st.column_config.TextColumn("Ngày thu"),
+                "Loại khoản thu": st.column_config.SelectboxColumn("Loại khoản thu", options=DEFAULT_INCOME_TYPES),
+                "Số tiền (đ)": st.column_config.NumberColumn("Số tiền", format="%,.0f đ"),
+                "Người thu": st.column_config.TextColumn("Người thu"),
+                "Ghi chú": st.column_config.TextColumn("Ghi chú")
+            },
+            use_container_width=True
+        )
+        
+        if st.button("Lưu thay đổi khoản thu", type="primary", key="save_inc_btn"):
+            success, msg = save_editor_changes(db, "finance_incomes", "incomes_editor", df_incomes)
+            if success:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
 
     with subtab_set:
         st.subheader("Báo cáo quyết toán chi tiết")
