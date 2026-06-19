@@ -20,6 +20,8 @@ st.set_page_config(
 # --- KHỞI TẠO CÁC HẰNG SỐ ---
 APP_TITLE = "Tennis vui"
 DEFAULT_DB_FILE = "tennis_monthly.tennis"
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "tennis_admin" # Bạn có thể đổi mật khẩu ở đây
 
 DEFAULT_RULES = {
     "fine_lose": 20000,
@@ -1556,6 +1558,31 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# --- KIỂM TRA ĐĂNG NHẬP ---
+if "logged_in" not in st.session_state:
+    st.session_state["logged_in"] = False
+
+if not st.session_state["logged_in"]:
+    st.markdown('<div class="header-gradient" style="text-align: center; margin-top: 80px;">TENNIS VUI</div>', unsafe_allow_html=True)
+    st.markdown('<h3 style="text-align: center; color: #94a3b8; font-weight: 500;">Hệ thống Quản lý Tài chính & Giải đấu</h3>', unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        with st.form("login_form"):
+            st.subheader("🔑 Đăng nhập hệ thống")
+            username = st.text_input("Tên đăng nhập", value="admin", placeholder="Nhập tên đăng nhập...")
+            password = st.text_input("Mật khẩu", type="password", placeholder="Nhập mật khẩu...")
+            submitted = st.form_submit_button("Đăng nhập", type="primary", use_container_width=True)
+            
+            if submitted:
+                if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+                    st.session_state["logged_in"] = True
+                    st.success("Đăng nhập thành công!")
+                    st.rerun()
+                else:
+                    st.error("Sai tên đăng nhập hoặc mật khẩu!")
+    st.stop()
+
 # --- QUẢN LÝ DANH SÁCH FILE DATABASE ---
 st.sidebar.markdown("### 🎾 CƠ SỞ DỮ LIỆU")
 
@@ -1674,6 +1701,12 @@ with st.sidebar.popover("🗑️ Xóa file dữ liệu", use_container_width=Tru
             st.rerun()
         except Exception as e:
             st.error(f"Lỗi khi xóa file: {e}")
+
+# Nút đăng xuất ở cuối sidebar
+st.sidebar.write("---")
+if st.sidebar.button("🚗 Đăng xuất (Logout)", use_container_width=True, key="logout_btn"):
+    st.session_state["logged_in"] = False
+    st.rerun()
 
 # Tiêu đề chính
 st.markdown(f'<div class="header-gradient">TENNIS VUI</div>', unsafe_allow_html=True)
