@@ -1675,8 +1675,49 @@ st.markdown(
 )
 
 # --- KIỂM TRA ĐĂNG NHẬP ---
+def get_cookies():
+    try:
+        cookie_header = st.context.headers.get("Cookie", "")
+        cookies = {}
+        for item in cookie_header.split(";"):
+            item = item.strip()
+            if "=" in item:
+                k, v = item.split("=", 1)
+                cookies[k.strip()] = v.strip()
+        return cookies
+    except Exception:
+        return {}
+
+# Xóa cookie nếu có yêu cầu đăng xuất
+if st.session_state.get("delete_login_cookie"):
+    import streamlit.components.v1 as components
+    components.html(
+        """
+        <script>
+            parent.document.cookie = "tennis_logged_in=; max-age=0; path=/";
+        </script>
+        """,
+        height=0
+    )
+    del st.session_state["delete_login_cookie"]
+
+# Ghi cookie nếu có yêu cầu lưu đăng nhập
+if st.session_state.get("write_login_cookie"):
+    import streamlit.components.v1 as components
+    components.html(
+        """
+        <script>
+            parent.document.cookie = "tennis_logged_in=true; max-age=2592000; path=/";
+        </script>
+        """,
+        height=0
+    )
+    del st.session_state["write_login_cookie"]
+
+# Kiểm tra trạng thái đăng nhập từ cookie
+cookies = get_cookies()
 if "logged_in" not in st.session_state:
-    st.session_state["logged_in"] = False
+    st.session_state["logged_in"] = (cookies.get("tennis_logged_in") == "true")
 
 if not st.session_state["logged_in"]:
     st.markdown('<div class="header-gradient" style="text-align: center; margin-top: 80px;">TENNIS VUI</div>', unsafe_allow_html=True)
@@ -1688,11 +1729,14 @@ if not st.session_state["logged_in"]:
             st.subheader("🔑 Đăng nhập hệ thống")
             username = st.text_input("Tên đăng nhập", value="admin", placeholder="Nhập tên đăng nhập...")
             password = st.text_input("Mật khẩu", type="password", placeholder="Nhập mật khẩu...")
+            remember_me = st.checkbox("Ghi nhớ đăng nhập trên thiết bị này")
             submitted = st.form_submit_button("Đăng nhập", type="primary", use_container_width=True)
             
             if submitted:
                 if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
                     st.session_state["logged_in"] = True
+                    if remember_me:
+                        st.session_state["write_login_cookie"] = True
                     st.success("Đăng nhập thành công!")
                     st.rerun()
                 else:
@@ -1857,6 +1901,7 @@ else:
 st.sidebar.write("---")
 if st.sidebar.button("🚗 Đăng xuất (Logout)", use_container_width=True, key="logout_btn"):
     st.session_state["logged_in"] = False
+    st.session_state["delete_login_cookie"] = True
     st.rerun()
 
 # Tiêu đề chính
