@@ -1662,6 +1662,19 @@ try:
 except Exception as e:
     st.sidebar.error(f"Lỗi đọc file: {e}")
 
+# Nút xóa file dữ liệu đang chọn
+with st.sidebar.popover("🗑️ Xóa file dữ liệu", use_container_width=True):
+    st.warning(f"⚠️ Hành động này sẽ xóa vĩnh viễn file `{selected_db}` khỏi hệ thống.")
+    confirm_delete = st.checkbox("Tôi chắc chắn muốn xóa file này", key="confirm_delete_db")
+    if st.button("Xác nhận Xóa Vĩnh Viễn", type="primary", key="delete_db_btn", disabled=not confirm_delete, use_container_width=True):
+        try:
+            db.conn.close()
+            os.remove(selected_db)
+            st.success(f"Đã xóa file `{selected_db}` thành công!")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Lỗi khi xóa file: {e}")
+
 # Tiêu đề chính
 st.markdown(f'<div class="header-gradient">TENNIS VUI</div>', unsafe_allow_html=True)
 st.markdown(f"**Dữ liệu đang xem:** `{selected_db}` | **Khoảng thời gian ({period_type}):** `{selected_period}`")
