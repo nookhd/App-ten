@@ -21,7 +21,7 @@ st.set_page_config(
 APP_TITLE = "Tennis vui"
 DEFAULT_DB_FILE = "tennis_monthly.tennis"
 ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "vui" # Bạn có thể đổi mật khẩu ở đây
+ADMIN_PASSWORD = "Vui" # Bạn có thể đổi mật khẩu ở đây
 
 DEFAULT_RULES = {
     "fine_lose": 20000,
