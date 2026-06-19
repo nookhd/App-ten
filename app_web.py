@@ -8,6 +8,8 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 from io import BytesIO
+import base64
+import requests
 
 # --- CẤU HÌNH TRANG WEB ---
 st.set_page_config(
@@ -81,6 +83,120 @@ def previous_month(month):
         return f"{y}-{m-1:02d}"
     except Exception:
         return datetime.now().strftime("%Y-%m")
+
+
+def perform_auto_daily_backup(selected_db):
+    try:
+        db_path = Path(selected_db)
+        if not db_path.exists():
+            return
+        
+        # Không tạo bản sao lưu cho chính file sao lưu hoặc file backup khác
+        if db_path.name.startswith("daily_backup_") or db_path.name.startswith("backup_"):
+            return
+            
+        today_str = datetime.now().strftime("%Y%m%d")
+        backup_prefix = f"daily_backup_{today_str}_"
+        backup_name = f"{backup_prefix}{db_path.name}"
+        
+        workspace_dir = db_path.parent
+        if str(workspace_dir) == ".":
+            workspace_dir = Path(os.getcwd())
+            
+        # Kiểm tra xem hôm nay đã sao lưu file này chưa
+        existing_backups = [
+            f for f in os.listdir(workspace_dir)
+            if f.startswith(backup_prefix) and f.endswith(db_path.name)
+        ]
+        
+        if not existing_backups:
+            shutil.copy(db_path, workspace_dir / backup_name)
+            
+        # Chỉ giữ lại tối đa 5 bản sao lưu tự động cho file này
+        all_daily_backups = sorted([
+            f for f in os.listdir(workspace_dir)
+            if f.startswith("daily_backup_") and f.endswith(db_path.name)
+        ])
+        
+        while len(all_daily_backups) > 5:
+            oldest_backup = all_daily_backups.pop(0)
+            try:
+                os.remove(workspace_dir / oldest_backup)
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[ERROR] Auto daily backup failed: {e}")
+
+
+def save_db_to_github(db_path_str):
+    if "GITHUB_TOKEN" not in st.secrets or "GITHUB_REPO" not in st.secrets:
+        return False, "Chưa cấu hình GITHUB_TOKEN hoặc GITHUB_REPO trong Streamlit Secrets."
+        
+    token = st.secrets["GITHUB_TOKEN"]
+    repo = st.secrets["GITHUB_REPO"]
+    branch = st.secrets.get("GITHUB_BRANCH", "main")
+    
+    path = db_path_str
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    
+    try:
+        sha = None
+        r_get = requests.get(url, headers=headers)
+        if r_get.status_code == 200:
+            sha = r_get.json().get("sha")
+            
+        with open(db_path_str, "rb") as f:
+            content_bytes = f.read()
+        content_base64 = base64.b64encode(content_bytes).decode("utf-8")
+        
+        data = {
+            "message": f"Backup database: {db_path_str} via Tennis Vui Web App",
+            "content": content_base64,
+            "branch": branch
+        }
+        if sha:
+            data["sha"] = sha
+            
+        r_put = requests.put(url, headers=headers, json=data)
+        if r_put.status_code in [200, 201]:
+            return True, f"Đã đồng bộ thành công file `{db_path_str}` lên GitHub!"
+        else:
+            return False, f"Lỗi GitHub API ({r_put.status_code}): {r_put.text}"
+            
+    except Exception as e:
+        return False, f"Lỗi kết nối GitHub: {e}"
+
+
+def load_db_from_github(db_path_str):
+    if "GITHUB_TOKEN" not in st.secrets or "GITHUB_REPO" not in st.secrets:
+        return False, "Chưa cấu hình GITHUB_TOKEN hoặc GITHUB_REPO trong Streamlit Secrets."
+        
+    token = st.secrets["GITHUB_TOKEN"]
+    repo = st.secrets["GITHUB_REPO"]
+    branch = st.secrets.get("GITHUB_BRANCH", "main")
+    
+    path = db_path_str
+    url = f"https://api.github.com/repos/{repo}/contents/{path}?ref={branch}"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3.raw"
+    }
+    
+    try:
+        r = requests.get(url, headers=headers)
+        if r.status_code == 200:
+            with open(db_path_str, "wb") as f:
+                f.write(r.content)
+            return True, f"Đã tải thành công file `{db_path_str}` từ GitHub về ứng dụng!"
+        else:
+            return False, f"Lỗi GitHub API ({r.status_code}): {r.text}"
+            
+    except Exception as e:
+        return False, f"Lỗi kết nối GitHub: {e}"
 
 
 # --- PHẦN XỬ LÝ DATABASE ---
@@ -1610,6 +1726,9 @@ selected_db = st.sidebar.selectbox(
     index=sorted(local_files).index(DEFAULT_DB_FILE) if DEFAULT_DB_FILE in local_files else 0
 )
 
+# Tự động tạo bản sao lưu hàng ngày (giới hạn tối đa 5 bản)
+perform_auto_daily_backup(selected_db)
+
 # Khởi tạo db kết nối (mỗi lần rerun sẽ mở kết nối riêng để tránh lỗi đa luồng)
 db = TennisDB(selected_db)
 
@@ -1703,6 +1822,38 @@ with st.sidebar.popover("🗑️ Xóa file dữ liệu", use_container_width=Tru
             st.error(f"Lỗi khi xóa file: {e}")
 
 # Nút đăng xuất ở cuối sidebar
+st.sidebar.write("---")
+
+# Nút lưu trữ/đồng bộ lên đám mây GitHub
+if "GITHUB_TOKEN" in st.secrets and "GITHUB_REPO" in st.secrets:
+    col_git1, col_git2 = st.sidebar.columns(2)
+    with col_git1:
+        if st.button("☁️ Lưu lên GitHub", use_container_width=True, key="sync_push_btn"):
+            with st.spinner("Đang lưu lên..."):
+                success, msg = save_db_to_github(selected_db)
+                if success:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+    with col_git2:
+        if st.button("☁️ Tải từ GitHub", use_container_width=True, key="sync_pull_btn"):
+            with st.spinner("Đang tải về..."):
+                success, msg = load_db_from_github(selected_db)
+                if success:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+else:
+    with st.sidebar.expander("☁️ Đồng bộ GitHub (Đám mây)"):
+        st.info(
+            "Để đồng bộ 2 chiều với GitHub từ web, hãy thêm các cấu hình sau vào phần **Secrets** của Streamlit Cloud:\n"
+            "```toml\n"
+            "GITHUB_TOKEN = \"your_personal_access_token\"\n"
+            "GITHUB_REPO = \"your_username/your_repo_name\"\n"
+            "```"
+        )
+
 st.sidebar.write("---")
 if st.sidebar.button("🚗 Đăng xuất (Logout)", use_container_width=True, key="logout_btn"):
     st.session_state["logged_in"] = False
