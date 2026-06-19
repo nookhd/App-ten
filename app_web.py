@@ -387,8 +387,6 @@ class TennisDB:
         return {normalize_text_key(name) for name in LEGACY_FUND_ENTITY_NAMES}
 
     def get_auto_income_collector(self, income_type, month):
-        if income_type in AUTO_INCOME_TYPES:
-            return FUND_ENTITY_NAME
         key = f"auto_income_collector::{month}::{income_type}"
         try:
             row = self.conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
@@ -1181,11 +1179,11 @@ def export_excel_bytes(db, months):
             "paid_by_external": "Đã chi hộ", "collected_by_external": "Đã thu hộ", "net_payable": "Cần thu/trả lại"
         })
         
-    df_expenses = pd.DataFrame(expenses, columns=["ID", "Ngày chi", "Loại chi phí", "Số tiền (đ)", "Người tham gia", "Người trả", "Ghi chú"])
+    df_expenses = pd.DataFrame(expenses, columns=["ID", "Ngày chi", "Loại chi phí", "Số tiền", "Người tham gia", "Người trả", "Ghi chú"])
     if not df_expenses.empty:
         df_expenses["Người tham gia"] = df_expenses["Người tham gia"].apply(lambda x: ", ".join(load_json_list(x)) if "All" not in load_json_list(x) else "Tất cả (All)")
         
-    df_incomes = pd.DataFrame(incomes, columns=["ID", "Ngày thu", "Loại khoản thu", "Số tiền (đ)", "Người thu", "Ghi chú"])
+    df_incomes = pd.DataFrame(incomes, columns=["ID", "Ngày thu", "Loại khoản thu", "Số tiền", "Người thu", "Ghi chú"])
     
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -1448,14 +1446,27 @@ def save_editor_changes(db, table_name, editor_key, df_original):
         # 1. Deletions
         if "deleted_rows" in changes and changes["deleted_rows"]:
             for row_idx in changes["deleted_rows"]:
-                row_id = int(df_original.iloc[row_idx]["ID"])
+                row_id_val = df_original.iloc[row_idx]["ID"]
+                if row_id_val == "AUTO" or str(row_id_val).strip() == "AUTO":
+                    continue
+                row_id = int(row_id_val)
                 cur.execute(f"DELETE FROM {table_name} WHERE id = ?", (row_id,))
         
         # 2. Edits
         if "edited_rows" in changes and changes["edited_rows"]:
             for row_idx_str, col_changes in changes["edited_rows"].items():
                 row_idx = int(row_idx_str)
-                row_id = int(df_original.iloc[row_idx]["ID"])
+                row_id_val = df_original.iloc[row_idx]["ID"]
+                if row_id_val == "AUTO" or str(row_id_val).strip() == "AUTO":
+                    if table_name == "finance_incomes":
+                        new_collector = col_changes.get("Người thu")
+                        if new_collector:
+                            income_type = df_original.iloc[row_idx]["Loại khoản thu"]
+                            month = df_original.iloc[row_idx]["Ngày thu"]
+                            key = f"auto_income_collector::{month}::{income_type}"
+                            cur.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (key, new_collector))
+                    continue
+                row_id = int(row_id_val)
                 row_data = df_original.iloc[row_idx].to_dict()
                 row_data.update(col_changes)
                 
@@ -1498,7 +1509,7 @@ def save_editor_changes(db, table_name, editor_key, df_original):
                     )
                 
                 elif table_name == "finance_expenses":
-                    amount = int(row_data["Số tiền (đ)"])
+                    amount = int(row_data["Số tiền"])
                     payer = str(row_data["Người trả"]).strip()
                     note = str(row_data["Ghi chú"]).strip() if not pd.isna(row_data["Ghi chú"]) else ""
                     expense_type = str(row_data["Loại chi phí"]).strip()
@@ -1520,7 +1531,7 @@ def save_editor_changes(db, table_name, editor_key, df_original):
                     )
                 
                 elif table_name == "finance_incomes":
-                    amount = int(row_data["Số tiền (đ)"])
+                    amount = int(row_data["Số tiền"])
                     collector = str(row_data["Người thu"]).strip()
                     note = str(row_data["Ghi chú"]).strip() if not pd.isna(row_data["Ghi chú"]) else ""
                     income_type = str(row_data["Loại khoản thu"]).strip()
@@ -1583,7 +1594,7 @@ def save_editor_changes(db, table_name, editor_key, df_original):
                     )
                 
                 elif table_name == "finance_expenses":
-                    amount = int(row_data.get("Số tiền (đ)", 0))
+                    amount = int(row_data.get("Số tiền", 0))
                     payer = str(row_data.get("Người trả", "Quỹ")).strip()
                     note = str(row_data.get("Ghi chú", "")).strip()
                     expense_type = str(row_data.get("Loại chi phí", EXPENSE_TYPES[0])).strip()
@@ -1606,7 +1617,7 @@ def save_editor_changes(db, table_name, editor_key, df_original):
                     )
                 
                 elif table_name == "finance_incomes":
-                    amount = int(row_data.get("Số tiền (đ)", 0))
+                    amount = int(row_data.get("Số tiền", 0))
                     collector = str(row_data.get("Người thu", "Quỹ")).strip()
                     note = str(row_data.get("Ghi chú", "")).strip()
                     income_type = str(row_data.get("Loại khoản thu", DEFAULT_INCOME_TYPES[0])).strip()
@@ -2040,11 +2051,11 @@ with tab_input_match:
         custom_fine = st.checkbox("Tiền trận", key="in_custom_fine")
         match_money_val = None
         if custom_fine:
-            match_money_val = st.number_input("Tiền trận (đ)", min_value=0, step=5000, value=20000, key="in_money")
+            match_money_val = st.number_input("Tiền trận", min_value=0, step=5000, value=20000, key="in_money")
         else:
             st.info("💡 Mặc định sử dụng Luật cấu hình")
             
-        match_bet = st.number_input("Tiền độ (đ)", min_value=0, step=10000, value=0, key="in_bet")
+        match_bet = st.number_input("Tiền độ", min_value=0, step=10000, value=0, key="in_bet")
         
         # Nhập tỷ số
         col_sa, col_sb = st.columns(2)
@@ -2140,9 +2151,9 @@ with tab_input_match:
                 "B": st.column_config.NumberColumn("B", min_value=0, max_value=7, format="%d"),
                 "B1": st.column_config.TextColumn("B1"),
                 "B2": st.column_config.TextColumn("B2"),
-                "Tiền trận": st.column_config.NumberColumn("Tiền trận", format="%,.0f đ"),
-                "Tiền độ": st.column_config.NumberColumn("Tiền độ", format="%,.0f đ"),
-                "Tiền thu trận": st.column_config.NumberColumn("Tiền thu trận", disabled=True, format="%,.0f đ"),
+                "Tiền trận": st.column_config.NumberColumn("Tiền trận", format="%,.0f"),
+                "Tiền độ": st.column_config.NumberColumn("Tiền độ", format="%,.0f"),
+                "Tiền thu trận": st.column_config.NumberColumn("Tiền thu trận", disabled=True, format="%,.0f"),
                 "Kết quả": st.column_config.TextColumn("Kết quả", disabled=True),
                 "Ghi chú": st.column_config.TextColumn("Ghi chú")
             },
@@ -2191,9 +2202,9 @@ with tab_rank:
                 "Thắng": st.column_config.NumberColumn("Thắng", format="%d"),
                 "Hòa": st.column_config.NumberColumn("Hòa", format="%d"),
                 "Thua": st.column_config.NumberColumn("Thua", format="%d"),
-                "Tiền trận": st.column_config.NumberColumn("Tiền trận", format="%,.0f đ"),
-                "Tiền độ": st.column_config.NumberColumn("Tiền độ", format="%,.0f đ"),
-                "Tổng tiền": st.column_config.NumberColumn("Tổng tiền", format="%,.0f đ"),
+                "Tiền trận": st.column_config.NumberColumn("Tiền trận", format="%,.0f"),
+                "Tiền độ": st.column_config.NumberColumn("Tiền độ", format="%,.0f"),
+                "Tổng tiền": st.column_config.NumberColumn("Tổng tiền", format="%,.0f"),
                 "Điểm thành tích": st.column_config.NumberColumn("Điểm thành tích", format="%d")
             },
             use_container_width=True
@@ -2222,9 +2233,9 @@ with tab_money:
         st.dataframe(
             df_money.set_index("Tên hội viên"),
             column_config={
-                "Tiền trận": st.column_config.NumberColumn("Tiền trận", format="%,.0f đ"),
-                "Tiền độ": st.column_config.NumberColumn("Tiền độ", format="%,.0f đ"),
-                "Tổng cộng": st.column_config.NumberColumn("Tổng cộng", format="%,.0f đ")
+                "Tiền trận": st.column_config.NumberColumn("Tiền trận", format="%,.0f"),
+                "Tiền độ": st.column_config.NumberColumn("Tiền độ", format="%,.0f"),
+                "Tổng cộng": st.column_config.NumberColumn("Tổng cộng", format="%,.0f")
             },
             use_container_width=True
         )
@@ -2249,8 +2260,8 @@ with tab_stats:
         
         c1, c2, c3 = st.columns(3)
         c1.metric("Tổng số trận đấu", f"{total_matches} trận")
-        c2.metric("Tổng tiền thu từ trận", f"{total_collected:,.0f} đ")
-        c3.metric("Tổng tiền độ phát sinh", f"{total_bets:,.0f} đ")
+        c2.metric("Tổng tiền thu từ trận", f"{total_collected:,.0f}")
+        c3.metric("Tổng tiền độ phát sinh", f"{total_bets:,.0f}")
         
         st.write("---")
         st.subheader("Danh sách tất cả trận đấu trong kỳ")
@@ -2268,8 +2279,8 @@ with tab_stats:
             df_display_list.set_index("ID"),
             column_config={
                 "Trận số": st.column_config.NumberColumn("Trận số", format="%d"),
-                "Tiền trận": st.column_config.NumberColumn("Tiền trận", format="%,.0f đ"),
-                "Tiền độ": st.column_config.NumberColumn("Tiền độ", format="%,.0f đ")
+                "Tiền trận": st.column_config.NumberColumn("Tiền trận", format="%,.0f"),
+                "Tiền độ": st.column_config.NumberColumn("Tiền độ", format="%,.0f")
             },
             use_container_width=True
         )
@@ -2284,10 +2295,10 @@ with tab_finance:
     st.subheader("Thẻ Tổng Hợp Tài Chính Quỹ")
     
     col_f1, col_f2, col_f3, col_f4 = st.columns(4)
-    col_f1.metric("Số dư quỹ lũy kế cuối kỳ", f"{finance_summary['fund_balance']:,.0f} đ")
-    col_f2.metric("Tổng thu quỹ trong kỳ", f"{finance_summary['total_income_fund']:,.0f} đ")
-    col_f3.metric("Tổng chi tiêu quỹ", f"{finance_summary['total_expense']:,.0f} đ")
-    col_f4.metric("Thặng dư tích lũy kỳ", f"{finance_summary['fund_this_month']:,.0f} đ")
+    col_f1.metric("Số dư quỹ lũy kế cuối kỳ", f"{finance_summary['fund_balance']:,.0f}")
+    col_f2.metric("Tổng thu quỹ trong kỳ", f"{finance_summary['total_income_fund']:,.0f}")
+    col_f3.metric("Tổng chi tiêu quỹ", f"{finance_summary['total_expense']:,.0f}")
+    col_f4.metric("Thặng dư tích lũy kỳ", f"{finance_summary['fund_this_month']:,.0f}")
     
     st.write("---")
     
@@ -2354,9 +2365,9 @@ with tab_finance:
         # Hiển thị bảng chi
         if not expenses_list:
             st.info("💡 Chưa có khoản chi nào trong kỳ này. Nhập các trường trên và bấm 'Thêm chi' để bắt đầu.")
-            df_expenses = pd.DataFrame(columns=["ID", "Ngày chi", "Loại chi phí", "Số tiền (đ)", "Người tham gia", "Người trả", "Ghi chú"])
+            df_expenses = pd.DataFrame(columns=["ID", "Ngày chi", "Loại chi phí", "Số tiền", "Người tham gia", "Người trả", "Ghi chú"])
         else:
-            df_expenses = pd.DataFrame(expenses_list, columns=["ID", "Ngày chi", "Loại chi phí", "Số tiền (đ)", "Người tham gia", "Người trả", "Ghi chú"])
+            df_expenses = pd.DataFrame(expenses_list, columns=["ID", "Ngày chi", "Loại chi phí", "Số tiền", "Người tham gia", "Người trả", "Ghi chú"])
             df_expenses["Người tham gia"] = df_expenses["Người tham gia"].apply(lambda x: ", ".join(load_json_list(x)) if "All" not in load_json_list(x) else "All")
             
         edited_exp_df = st.data_editor(
@@ -2367,7 +2378,7 @@ with tab_finance:
                 "ID": st.column_config.NumberColumn("ID", disabled=True, format="%d"),
                 "Ngày chi": st.column_config.TextColumn("Ngày chi"),
                 "Loại chi phí": st.column_config.SelectboxColumn("Loại chi phí", options=EXPENSE_TYPES),
-                "Số tiền (đ)": st.column_config.NumberColumn("Số tiền", format="%,.0f đ"),
+                "Số tiền": st.column_config.NumberColumn("Số tiền", format="%,.0f"),
                 "Người tham gia": st.column_config.TextColumn("Người tham gia"),
                 "Người trả": st.column_config.TextColumn("Người trả"),
                 "Ghi chú": st.column_config.TextColumn("Ghi chú")
@@ -2429,21 +2440,32 @@ with tab_finance:
                     st.error(f"Lỗi: {e}")
 
         # Hiển thị bảng thu
+        target_month = months_to_query[-1]
+        rounded_collector = db.get_auto_income_collector(AUTO_ROUNDED_MEMBER_INCOME, target_month)
+        external_collector = db.get_auto_income_collector(AUTO_EXTERNAL_INCOME, target_month)
+        
+        auto_rows = [
+            ("AUTO", target_month, AUTO_ROUNDED_MEMBER_INCOME, int(round(finance_summary.get("total_rounded_fee", 0))), rounded_collector, ""),
+            ("AUTO", target_month, AUTO_EXTERNAL_INCOME, int(round(finance_summary.get("external_income_total", 0))), external_collector, "")
+        ]
+        df_incomes_auto = pd.DataFrame(auto_rows, columns=["ID", "Ngày thu", "Loại khoản thu", "Số tiền", "Người thu", "Ghi chú"])
+        
         if not incomes_list:
-            st.info("💡 Chưa có khoản thu nào trong kỳ này. Nhập các trường trên và bấm 'Thêm thu' để bắt đầu.")
-            df_incomes = pd.DataFrame(columns=["ID", "Ngày thu", "Loại khoản thu", "Số tiền (đ)", "Người thu", "Ghi chú"])
+            df_incomes_manual = pd.DataFrame(columns=["ID", "Ngày thu", "Loại khoản thu", "Số tiền", "Người thu", "Ghi chú"])
         else:
-            df_incomes = pd.DataFrame(incomes_list, columns=["ID", "Ngày thu", "Loại khoản thu", "Số tiền (đ)", "Người thu", "Ghi chú"])
+            df_incomes_manual = pd.DataFrame(incomes_list, columns=["ID", "Ngày thu", "Loại khoản thu", "Số tiền", "Người thu", "Ghi chú"])
+            
+        df_incomes = pd.concat([df_incomes_auto, df_incomes_manual], ignore_index=True)
             
         edited_inc_df = st.data_editor(
             df_incomes,
             num_rows="dynamic",
             key="incomes_editor",
             column_config={
-                "ID": st.column_config.NumberColumn("ID", disabled=True, format="%d"),
+                "ID": st.column_config.TextColumn("ID", disabled=True),
                 "Ngày thu": st.column_config.TextColumn("Ngày thu"),
-                "Loại khoản thu": st.column_config.SelectboxColumn("Loại khoản thu", options=DEFAULT_INCOME_TYPES),
-                "Số tiền (đ)": st.column_config.NumberColumn("Số tiền", format="%,.0f đ"),
+                "Loại khoản thu": st.column_config.SelectboxColumn("Loại khoản thu", options=DEFAULT_INCOME_TYPES + list(AUTO_INCOME_TYPES)),
+                "Số tiền": st.column_config.NumberColumn("Số tiền", format="%,.0f"),
                 "Người thu": st.column_config.TextColumn("Người thu"),
                 "Ghi chú": st.column_config.TextColumn("Ghi chú")
             },
@@ -2495,17 +2517,17 @@ with tab_finance:
                 df_mem_fin_display[cols_to_show].set_index("Hội viên"),
                 column_config={
                     "Buổi/Tuần": st.column_config.NumberColumn("Buổi/Tuần", format="%d"),
-                    "Tiền sân": st.column_config.NumberColumn("Tiền sân", format="%,.0f đ"),
-                    "Bóng + Nhặt": st.column_config.NumberColumn("Bóng + Nhặt", format="%,.0f đ"),
-                    "Ăn uống": st.column_config.NumberColumn("Ăn uống", format="%,.0f đ"),
-                    "Chi khác": st.column_config.NumberColumn("Chi khác", format="%,.0f đ"),
-                    "Tiền phạt": st.column_config.NumberColumn("Tiền phạt", format="%,.0f đ"),
-                    "Tiền độ": st.column_config.NumberColumn("Tiền độ", format="%,.0f đ"),
-                    "Phí thực tính": st.column_config.NumberColumn("Phí thực tính", format="%,.0f đ"),
-                    "Phí làm tròn": st.column_config.NumberColumn("Phí làm tròn", format="%,.0f đ"),
-                    "Đã chi hộ": st.column_config.NumberColumn("Đã chi hộ", format="%,.0f đ"),
-                    "Đã thu hộ": st.column_config.NumberColumn("Đã thu hộ", format="%,.0f đ"),
-                    "Cần thu (Thu tháng)": st.column_config.NumberColumn("Cần thu (Thu tháng)", format="%,.0f đ")
+                    "Tiền sân": st.column_config.NumberColumn("Tiền sân", format="%,.0f"),
+                    "Bóng + Nhặt": st.column_config.NumberColumn("Bóng + Nhặt", format="%,.0f"),
+                    "Ăn uống": st.column_config.NumberColumn("Ăn uống", format="%,.0f"),
+                    "Chi khác": st.column_config.NumberColumn("Chi khác", format="%,.0f"),
+                    "Tiền phạt": st.column_config.NumberColumn("Tiền phạt", format="%,.0f"),
+                    "Tiền độ": st.column_config.NumberColumn("Tiền độ", format="%,.0f"),
+                    "Phí thực tính": st.column_config.NumberColumn("Phí thực tính", format="%,.0f"),
+                    "Phí làm tròn": st.column_config.NumberColumn("Phí làm tròn", format="%,.0f"),
+                    "Đã chi hộ": st.column_config.NumberColumn("Đã chi hộ", format="%,.0f"),
+                    "Đã thu hộ": st.column_config.NumberColumn("Đã thu hộ", format="%,.0f"),
+                    "Cần thu (Thu tháng)": st.column_config.NumberColumn("Cần thu (Thu tháng)", format="%,.0f")
                 },
                 use_container_width=True
             )
@@ -2522,11 +2544,11 @@ with tab_finance:
             st.dataframe(
                 df_ext_display.set_index("Họ và tên"),
                 column_config={
-                    "Tiền ăn uống": st.column_config.NumberColumn("Tiền ăn uống", format="%,.0f đ"),
-                    "Khoản chi khác": st.column_config.NumberColumn("Khoản chi khác", format="%,.0f đ"),
-                    "Đã chi hộ": st.column_config.NumberColumn("Đã chi hộ", format="%,.0f đ"),
-                    "Đã thu hộ": st.column_config.NumberColumn("Đã thu hộ", format="%,.0f đ"),
-                    "Cần thu/trả lại": st.column_config.NumberColumn("Cần thu/trả lại", format="%,.0f đ")
+                    "Tiền ăn uống": st.column_config.NumberColumn("Tiền ăn uống", format="%,.0f"),
+                    "Khoản chi khác": st.column_config.NumberColumn("Khoản chi khác", format="%,.0f"),
+                    "Đã chi hộ": st.column_config.NumberColumn("Đã chi hộ", format="%,.0f"),
+                    "Đã thu hộ": st.column_config.NumberColumn("Đã thu hộ", format="%,.0f"),
+                    "Cần thu/trả lại": st.column_config.NumberColumn("Cần thu/trả lại", format="%,.0f")
                 },
                 use_container_width=True
             )
@@ -2572,9 +2594,9 @@ with tab_data:
     with subtab_rules:
         st.subheader("Cấu hình mức phạt & Tính điểm")
         
-        rule_lose = st.number_input("Tiền phạt khi thua trận (đ):", value=rules["fine_lose"], step=5000)
-        rule_draw = st.number_input("Tiền phạt khi hòa trận (đ):", value=rules["fine_draw"], step=5000)
-        rule_zero = st.number_input("Tiền phạt khi thua trắng 0 bàn (đ):", value=rules["fine_lose_zero"], step=5000)
+        rule_lose = st.number_input("Tiền phạt khi thua trận:", value=rules["fine_lose"], step=5000)
+        rule_draw = st.number_input("Tiền phạt khi hòa trận:", value=rules["fine_draw"], step=5000)
+        rule_zero = st.number_input("Tiền phạt khi thua trắng 0 bàn:", value=rules["fine_lose_zero"], step=5000)
         
         rule_pt_win = st.number_input("Điểm cộng khi Thắng:", value=rules["point_win"], step=1)
         rule_pt_draw = st.number_input("Điểm cộng khi Hòa:", value=rules["point_draw"], step=1)
