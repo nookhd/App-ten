@@ -1008,7 +1008,7 @@ def get_result_text(score_a, score_b):
 def export_excel_bytes(db, months):
     matches = db.fetch_matches(months)
     df_matches = pd.DataFrame(matches, columns=[
-        "ID", "Ngày", "Trận số", "A1", "A2", "B1", "B2", "Điểm A", "Điểm B", "Phạt tự chọn", "Tiền độ", "Ghi chú"
+        "ID", "Ngày", "Trận số", "A1", "A2", "B1", "B2", "Điểm A", "Điểm B", "Tiền trận", "Tiền độ", "Ghi chú"
     ])
     
     stats = db.calculate_stats(months)
@@ -1112,7 +1112,7 @@ def export_pdf_bytes(db, months):
         
     matches = db.fetch_matches(months)
     df_matches = pd.DataFrame(matches, columns=[
-        "ID", "Ngày", "Trận số", "A1", "A2", "B1", "B2", "Điểm A", "Điểm B", "Phạt", "Độ", "Ghi chú"
+        "ID", "Ngày", "Trận số", "A1", "A2", "B1", "B2", "Điểm A", "Điểm B", "Tiền trận", "Độ", "Ghi chú"
     ])
     
     stats = db.calculate_stats(months)
@@ -1713,7 +1713,7 @@ with tab_input_match:
             b2 = b2_select
             
     with col_f3:
-        custom_fine = st.checkbox("Tiền phạt tự chọn", key="in_custom_fine")
+        custom_fine = st.checkbox("Tiền trận", key="in_custom_fine")
         match_money_val = None
         if custom_fine:
             match_money_val = st.number_input("Tiền trận (đ)", min_value=0, step=5000, value=20000, key="in_money")
@@ -1913,13 +1913,13 @@ with tab_stats:
         
         # Hiển thị list tĩnh đẹp đẽ để xem
         df_view = pd.DataFrame(matches_raw, columns=[
-            "ID", "Ngày", "Trận số", "A1", "A2", "B1", "B2", "Điểm A", "Điểm B", "Phạt tự chọn", "Tiền độ", "Ghi chú"
+            "ID", "Ngày", "Trận số", "A1", "A2", "B1", "B2", "Điểm A", "Điểm B", "Tiền trận", "Tiền độ", "Ghi chú"
         ])
         df_view["Đội A"] = df_view.apply(lambda r: f"{r['A1']} + {r['A2']}" if r['A2'] else r['A1'], axis=1)
         df_view["Đội B"] = df_view.apply(lambda r: f"{r['B1']} + {r['B2']}" if r['B2'] else r['B1'], axis=1)
         df_view["Tỷ số"] = df_view.apply(lambda r: f"{r['Điểm A']} - {r['Điểm B']}", axis=1)
         
-        df_display_list = df_view[["ID", "Ngày", "Trận số", "Đội A", "Tỷ số", "Đội B", "Phạt tự chọn", "Tiền độ", "Ghi chú"]]
+        df_display_list = df_view[["ID", "Ngày", "Trận số", "Đội A", "Tỷ số", "Đội B", "Tiền trận", "Tiền độ", "Ghi chú"]]
         st.dataframe(df_display_list.set_index("ID"), use_container_width=True)
     else:
         st.info("Chưa có trận đấu nào trong thời gian này.")
