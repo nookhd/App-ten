@@ -128,7 +128,7 @@ def perform_auto_daily_backup(selected_db):
         print(f"[ERROR] Auto daily backup failed: {e}")
 
 
-def save_db_to_github(db_path_str):
+def save_db_to_github(db_path_str, github_filename):
     if "GITHUB_TOKEN" not in st.secrets or "GITHUB_REPO" not in st.secrets:
         return False, "Chưa cấu hình GITHUB_TOKEN hoặc GITHUB_REPO trong Streamlit Secrets."
         
@@ -136,7 +136,7 @@ def save_db_to_github(db_path_str):
     repo = st.secrets["GITHUB_REPO"]
     branch = st.secrets.get("GITHUB_BRANCH", "main")
     
-    path = db_path_str
+    path = github_filename
     url = f"https://api.github.com/repos/{repo}/contents/{path}"
     headers = {
         "Authorization": f"token {token}",
@@ -154,7 +154,7 @@ def save_db_to_github(db_path_str):
         content_base64 = base64.b64encode(content_bytes).decode("utf-8")
         
         data = {
-            "message": f"Backup database: {db_path_str} via Tennis Vui Web App",
+            "message": f"Backup database: {db_path_str} via Tennis Vui Web App as {github_filename}",
             "content": content_base64,
             "branch": branch
         }
@@ -163,7 +163,7 @@ def save_db_to_github(db_path_str):
             
         r_put = requests.put(url, headers=headers, json=data)
         if r_put.status_code in [200, 201]:
-            return True, f"Đã đồng bộ thành công file `{db_path_str}` lên GitHub!"
+            return True, f"Đã đồng bộ thành công file `{db_path_str}` lên GitHub dưới tên `{github_filename}`!"
         else:
             return False, f"Lỗi GitHub API ({r_put.status_code}): {r_put.text}"
             
@@ -1721,7 +1721,6 @@ if "logged_in" not in st.session_state:
 
 if not st.session_state["logged_in"]:
     st.markdown('<div class="header-gradient" style="text-align: center; margin-top: 80px;">TENNIS VUI</div>', unsafe_allow_html=True)
-    st.markdown('<h3 style="text-align: center; color: #94a3b8; font-weight: 500;">Hệ thống Quản lý Tài chính & Giải đấu</h3>', unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
@@ -1854,13 +1853,15 @@ except Exception as e:
 
 # Nút xóa file dữ liệu đang chọn
 with st.sidebar.popover("🗑️ Xóa file dữ liệu", use_container_width=True):
-    st.warning(f"⚠️ Hành động này sẽ xóa vĩnh viễn file `{selected_db}` khỏi hệ thống.")
+    file_to_delete = st.selectbox("Chọn file muốn xóa:", options=sorted(local_files), key="file_to_delete_sb")
+    st.warning(f"⚠️ Hành động này sẽ xóa vĩnh viễn file `{file_to_delete}` khỏi hệ thống.")
     confirm_delete = st.checkbox("Tôi chắc chắn muốn xóa file này", key="confirm_delete_db")
     if st.button("Xác nhận Xóa Vĩnh Viễn", type="primary", key="delete_db_btn", disabled=not confirm_delete, use_container_width=True):
         try:
-            db.conn.close()
-            os.remove(selected_db)
-            st.success(f"Đã xóa file `{selected_db}` thành công!")
+            if file_to_delete == selected_db:
+                db.conn.close()
+            os.remove(file_to_delete)
+            st.success(f"Đã xóa file `{file_to_delete}` thành công!")
             st.rerun()
         except Exception as e:
             st.error(f"Lỗi khi xóa file: {e}")
@@ -1872,13 +1873,18 @@ st.sidebar.write("---")
 if "GITHUB_TOKEN" in st.secrets and "GITHUB_REPO" in st.secrets:
     col_git1, col_git2 = st.sidebar.columns(2)
     with col_git1:
-        if st.button("☁️ Lưu lên GitHub", use_container_width=True, key="sync_push_btn"):
-            with st.spinner("Đang lưu lên..."):
-                success, msg = save_db_to_github(selected_db)
-                if success:
-                    st.success(msg)
+        with st.popover("☁️ Lưu lên GitHub", use_container_width=True):
+            github_name = st.text_input("Tên file trên GitHub:", value=selected_db, key="gh_save_name")
+            if st.button("Xác nhận Lưu", type="primary", use_container_width=True, key="sync_push_btn"):
+                if not github_name.strip():
+                    st.error("Tên file không được để trống!")
                 else:
-                    st.error(msg)
+                    with st.spinner("Đang lưu lên..."):
+                        success, msg = save_db_to_github(selected_db, github_name.strip())
+                        if success:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
     with col_git2:
         if st.button("☁️ Tải từ GitHub", use_container_width=True, key="sync_pull_btn"):
             with st.spinner("Đang tải về..."):
