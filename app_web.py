@@ -1648,6 +1648,20 @@ if st.sidebar.button("💾 Sao lưu (Backup)"):
     shutil.copy(selected_db, backup_name)
     st.sidebar.success(f"Đã sao lưu thành: {backup_name}")
 
+# Nút tải trực tiếp file dữ liệu về thiết bị (để lưu trữ vào OneDrive / Google Drive)
+try:
+    with open(selected_db, "rb") as f:
+        db_bytes = f.read()
+    st.sidebar.download_button(
+        label="📥 Tải file dữ liệu (.tennis)",
+        data=db_bytes,
+        file_name=selected_db,
+        mime="application/octet-stream",
+        use_container_width=True
+    )
+except Exception as e:
+    st.sidebar.error(f"Lỗi đọc file: {e}")
+
 # Tiêu đề chính
 st.markdown(f'<div class="header-gradient">TENNIS VUI</div>', unsafe_allow_html=True)
 st.markdown(f"**Dữ liệu đang xem:** `{selected_db}` | **Khoảng thời gian ({period_type}):** `{selected_period}`")
