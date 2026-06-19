@@ -1709,43 +1709,57 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# --- KIỂM TRA ĐĂNG NHẬP ---
-def get_cookies():
-    try:
-        return st.context.cookies
-    except Exception:
-        return {}
+# --- KIỂM TRA ĐĂNG NHẬP (Lưu localStorage + st.query_params) ---
 
-# Xóa cookie nếu có yêu cầu đăng xuất
-if st.session_state.get("delete_login_cookie"):
+# Xóa localStorage nếu có yêu cầu đăng xuất
+if st.session_state.get("delete_login_localstorage"):
     st.html(
         """
         <script>
-            document.cookie = "tennis_logged_in=; max-age=0; path=/; SameSite=Lax";
+            localStorage.removeItem("tennis_logged_in");
         </script>
         """,
         unsafe_allow_javascript=True
     )
-    del st.session_state["delete_login_cookie"]
+    del st.session_state["delete_login_localstorage"]
 
-# Ghi cookie nếu có yêu cầu lưu đăng nhập
-if st.session_state.get("write_login_cookie"):
+# Ghi localStorage nếu có yêu cầu lưu đăng nhập
+if st.session_state.get("write_login_localstorage"):
     st.html(
         """
         <script>
-            document.cookie = "tennis_logged_in=true; max-age=2592000; path=/; SameSite=Lax";
+            localStorage.setItem("tennis_logged_in", "true");
         </script>
         """,
         unsafe_allow_javascript=True
     )
-    del st.session_state["write_login_cookie"]
+    del st.session_state["write_login_localstorage"]
 
-# Kiểm tra trạng thái đăng nhập từ cookie
-cookies = get_cookies()
-if "logged_in" not in st.session_state:
-    st.session_state["logged_in"] = (cookies.get("tennis_logged_in") == "true")
+# Kiểm trạng thái đăng nhập
+is_logged_in = False
+if st.session_state.get("logged_in"):
+    is_logged_in = True
+elif st.query_params.get("logged_in") == "true":
+    st.session_state["logged_in"] = True
+    is_logged_in = True
 
-if not st.session_state["logged_in"]:
+if not is_logged_in:
+    # Render script kiểm tra localStorage trên client-side để tự động đăng nhập
+    st.html(
+        """
+        <script>
+            if (localStorage.getItem("tennis_logged_in") === "true") {
+                const url = new URL(window.location.href);
+                if (url.searchParams.get("logged_in") !== "true") {
+                    url.searchParams.set("logged_in", "true");
+                    window.location.href = url.href;
+                }
+            }
+        </script>
+        """,
+        unsafe_allow_javascript=True
+    )
+
     st.markdown('<div class="header-gradient" style="text-align: center; margin-top: 80px;">TENNIS VUI</div>', unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -1760,8 +1774,9 @@ if not st.session_state["logged_in"]:
             if submitted:
                 if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
                     st.session_state["logged_in"] = True
+                    st.query_params["logged_in"] = "true"
                     if remember_me:
-                        st.session_state["write_login_cookie"] = True
+                        st.session_state["write_login_localstorage"] = True
                     st.success("Đăng nhập thành công!")
                     st.rerun()
                 else:
@@ -1968,7 +1983,8 @@ else:
 st.sidebar.write("---")
 if st.sidebar.button("🚗 Đăng xuất (Logout)", use_container_width=True, key="logout_btn"):
     st.session_state["logged_in"] = False
-    st.session_state["delete_login_cookie"] = True
+    st.query_params.clear()
+    st.session_state["delete_login_localstorage"] = True
     st.rerun()
 
 # Tiêu đề chính
