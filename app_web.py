@@ -1019,7 +1019,7 @@ def export_excel_bytes(db, months):
         df_stats.insert(0, "Hạng", range(1, len(df_stats) + 1))
         df_stats = df_stats.rename(columns={
             "name": "Tên hội viên", "matches": "Trận", "wins": "Thắng", "draws": "Hòa", "losses": "Thua",
-            "gf": "Bàn thắng", "ga": "Bàn thua", "match_money": "Tiền phạt trận", "bet_money": "Tiền độ",
+            "gf": "Bàn thắng", "ga": "Bàn thua", "match_money": "Tiền trận", "bet_money": "Tiền độ",
             "money": "Tổng tiền", "total_points": "Điểm thành tích"
         })
     
@@ -1856,7 +1856,7 @@ with tab_rank:
             "losses": "Thua",
             "gf": "Bàn thắng",
             "ga": "Bàn thua",
-            "match_money": "Tiền phạt trận",
+            "match_money": "Tiền trận",
             "bet_money": "Tiền độ",
             "money": "Tổng tiền",
             "total_points": "Điểm thành tích"
@@ -1870,14 +1870,14 @@ with tab_rank:
 # TAB 3: BẢNG TIỀN TRẬN (FINES DETAIL)
 # =========================================================
 with tab_money:
-    st.subheader("Chi tiết tiền phạt trận & Tiền độ hội viên")
+    st.subheader("Chi tiết tiền trận & Tiền độ hội viên")
     money_detail = db.get_period_match_money_detail_map(months_to_query)
     if money_detail:
         money_rows = []
         for name, data in money_detail.items():
             money_rows.append({
                 "Tên hội viên": name,
-                "Tiền phạt trận (đ)": data["match_money"],
+                "Tiền trận (đ)": data["match_money"],
                 "Tiền độ (đ)": data["bet_money"],
                 "Tổng cộng (đ)": data["total"]
             })
