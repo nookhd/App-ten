@@ -1718,37 +1718,25 @@ def get_cookies():
 
 # Xóa cookie nếu có yêu cầu đăng xuất
 if st.session_state.get("delete_login_cookie"):
-    import streamlit.components.v1 as components
-    components.html(
+    st.html(
         """
         <script>
-            try {
-                parent.document.cookie = "tennis_logged_in=; max-age=0; path=/; SameSite=Lax";
-            } catch(e){}
-            try {
-                document.cookie = "tennis_logged_in=; max-age=0; path=/; SameSite=Lax";
-            } catch(e){}
+            document.cookie = "tennis_logged_in=; max-age=0; path=/; SameSite=Lax";
         </script>
         """,
-        height=0
+        unsafe_allow_javascript=True
     )
     del st.session_state["delete_login_cookie"]
 
 # Ghi cookie nếu có yêu cầu lưu đăng nhập
 if st.session_state.get("write_login_cookie"):
-    import streamlit.components.v1 as components
-    components.html(
+    st.html(
         """
         <script>
-            try {
-                parent.document.cookie = "tennis_logged_in=true; max-age=2592000; path=/; SameSite=Lax";
-            } catch(e){}
-            try {
-                document.cookie = "tennis_logged_in=true; max-age=2592000; path=/; SameSite=Lax";
-            } catch(e){}
+            document.cookie = "tennis_logged_in=true; max-age=2592000; path=/; SameSite=Lax";
         </script>
         """,
-        height=0
+        unsafe_allow_javascript=True
     )
     del st.session_state["write_login_cookie"]
 
