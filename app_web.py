@@ -336,38 +336,31 @@ class TennisDB:
         except Exception:
             self.conn.rollback()
 
-    def fetch_matches(self, month=None):
+    def fetch_matches(self, months):
         cur = self.conn.cursor()
-        if month:
-            return cur.execute(
-                """
-                SELECT id, match_date, match_no, team_a1, team_a2, team_b1, team_b2, score_a, score_b, match_money, match_bet, note
-                FROM matches
-                WHERE substr(match_date, 1, 7) = ?
-                ORDER BY match_date DESC, match_no DESC, id DESC
-                """,
-                (month,)
-            ).fetchall()
-        else:
-            return cur.execute(
-                """
-                SELECT id, match_date, match_no, team_a1, team_a2, team_b1, team_b2, score_a, score_b, match_money, match_bet, note
-                FROM matches
-                ORDER BY match_date DESC, match_no DESC, id DESC
-                """
-            ).fetchall()
+        placeholders = ",".join("?" for _ in months)
+        return cur.execute(
+            f"""
+            SELECT id, match_date, match_no, team_a1, team_a2, team_b1, team_b2, score_a, score_b, match_money, match_bet, note
+            FROM matches
+            WHERE substr(match_date, 1, 7) IN ({placeholders})
+            ORDER BY match_date DESC, match_no DESC, id DESC
+            """,
+            months
+        ).fetchall()
 
-    def get_month_match_money_detail_map(self, month):
+    def get_period_match_money_detail_map(self, months):
         cur = self.conn.cursor()
+        placeholders = ",".join("?" for _ in months)
         rows = cur.execute(
-            """
+            f"""
             SELECT id, match_date, match_no, team_a1, team_a2, team_b1, team_b2,
                    score_a, score_b, match_money, match_bet
             FROM matches
-            WHERE substr(match_date, 1, 7) = ?
+            WHERE substr(match_date, 1, 7) IN ({placeholders})
             ORDER BY match_date, match_no, id
             """,
-            (month,)
+            months
         ).fetchall()
 
         rules = self.get_rules()
@@ -437,8 +430,8 @@ class TennisDB:
         if data["score_a"] == 0 and data["score_b"] == 0:
             raise ValueError("Tỷ số 0-0 không hợp lệ")
 
-    def calculate_stats(self, month=None):
-        rows = self.fetch_matches(month)
+    def calculate_stats(self, months):
+        rows = self.fetch_matches(months)
         rules = self.get_rules()
         stats = {}
 
@@ -507,7 +500,6 @@ class TennisDB:
     def calculate_finance_rows(self, month):
         cur = self.conn.cursor()
         
-        # Ensure initial record for the month
         cur.execute(
             "INSERT OR IGNORE INTO monthly_finance(month, court_cost, ball_cost, picker_cost, reserve_fund, fund_balance) VALUES (?, 0, 0, 0, 1800000, 0)",
             (month,)
@@ -839,15 +831,187 @@ class TennisDB:
         }
         return rows, expenses, incomes, summary
 
+    def get_month_match_money_detail_map(self, month):
+        cur = self.conn.cursor()
+        rows = cur.execute(
+            """
+            SELECT id, match_date, match_no, team_a1, team_a2, team_b1, team_b2,
+                   score_a, score_b, match_money, match_bet
+            FROM matches
+            WHERE substr(match_date, 1, 7) = ?
+            ORDER BY match_date, match_no, id
+            """,
+            (month,)
+        ).fetchall()
+
+        rules = self.get_rules()
+        money_map = {}
+
+        def get_row(name):
+            name = (name or "").strip()
+            if not name:
+                return None
+            if name not in money_map:
+                money_map[name] = {"match_money": 0, "bet_money": 0, "total": 0}
+            return money_map[name]
+
+        def add_money(name, match_part, bet_part):
+            row = get_row(name)
+            if row is None:
+                return
+            row["match_money"] += int(match_part or 0)
+            row["bet_money"] += int(bet_part or 0)
+            row["total"] += int(match_part or 0) + int(bet_part or 0)
+
+        for _mid, _date, _no, a1, a2, b1, b2, sa, sb, match_money, match_bet in rows:
+            team_a = [x for x in [a1, a2] if x]
+            team_b = [x for x in [b1, b2] if x]
+
+            base = match_money if match_money is not None else rules["fine_lose"]
+            draw = match_money if match_money is not None else rules["fine_draw"]
+            zero = match_money if match_money is not None else rules["fine_lose_zero"]
+            bet = int(match_bet or 0)
+
+            if sa > sb:
+                for name in team_b:
+                    add_money(name, zero if sb == 0 else base, bet)
+            elif sb > sa:
+                for name in team_a:
+                    add_money(name, zero if sa == 0 else base, bet)
+            else:
+                for name in team_a + team_b:
+                    add_money(name, draw, bet)
+
+        return money_map
+
+
+# --- QUẢN LÝ FINANCES CHO CẢ CHU KỲ (THÁNG, QUÝ, NĂM) ---
+def calculate_finance_period(db, months):
+    aggregated_members = {}
+    aggregated_expenses = []
+    aggregated_incomes = []
+    
+    aggregated_summary = {
+        "court_total": 0, "ball_total": 0, "picker_total": 0, "meal_total": 0,
+        "party_total": 0, "other_total": 0, "total_expense": 0,
+        "prev_match_revenue": 0, "match_revenue": 0, "bet_revenue": 0,
+        "other_income_total": 0, "total_rounded_fee": 0, "external_income_total": 0,
+        "total_income_fund": 0, "prev_fund": 0, "need_collect": 0, "real_collect": 0,
+        "member_real_collect": 0, "external_real_collect": 0, "round_extra": 0,
+        "fund_this_month": 0, "fund_balance": 0, "external_rows": []
+    }
+    
+    aggregated_external = {}
+    
+    for m in months:
+        rows, expenses, incomes, summary = db.calculate_finance_rows(m)
+        aggregated_expenses.extend(expenses)
+        aggregated_incomes.extend(incomes)
+        
+        for r in rows:
+            name = r["name"]
+            if name not in aggregated_members:
+                aggregated_members[name] = {
+                    "name": name, "weekly": r["weekly"], "court": 0, "ball_picker": 0,
+                    "meal": 0, "other_charge": 0, "match_money": 0, "bet_money": 0,
+                    "calc_fee": 0, "rounded_fee": 0, "paid_by_member": 0, "collected_by_member": 0, "net_payable": 0
+                }
+            m_agg = aggregated_members[name]
+            m_agg["court"] += r["court"]
+            m_agg["ball_picker"] += r["ball_picker"]
+            m_agg["meal"] += r["meal"]
+            m_agg["other_charge"] += r["other_charge"]
+            m_agg["match_money"] += r["match_money"]
+            m_agg["bet_money"] += r["bet_money"]
+            m_agg["calc_fee"] += r["calc_fee"]
+            m_agg["rounded_fee"] += r["rounded_fee"]
+            m_agg["paid_by_member"] += r["paid_by_member"]
+            m_agg["collected_by_member"] += r["collected_by_member"]
+            m_agg["net_payable"] += r["net_payable"]
+            
+        for er in summary["external_rows"]:
+            name = er["name"]
+            if name not in aggregated_external:
+                aggregated_external[name] = {
+                    "name": name, "meal": 0, "other": 0, "paid_by_external": 0, "collected_by_external": 0, "net_payable": 0
+                }
+            e_agg = aggregated_external[name]
+            e_agg["meal"] += er["meal"]
+            e_agg["other"] += er["other"]
+            e_agg["paid_by_external"] += er["paid_by_external"]
+            e_agg["collected_by_external"] += er["collected_by_external"]
+            e_agg["net_payable"] += er["net_payable"]
+            
+        for k in ["court_total", "ball_total", "picker_total", "meal_total", "party_total", "other_total",
+                  "total_expense", "prev_match_revenue", "match_revenue", "bet_revenue",
+                  "other_income_total", "total_rounded_fee", "external_income_total",
+                  "total_income_fund", "need_collect", "real_collect", "member_real_collect",
+                  "external_real_collect", "round_extra", "fund_this_month"]:
+            aggregated_summary[k] += summary[k]
+            
+    sorted_months = sorted(months)
+    if sorted_months:
+        _, _, _, first_summary = db.calculate_finance_rows(sorted_months[0])
+        _, _, _, last_summary = db.calculate_finance_rows(sorted_months[-1])
+        aggregated_summary["prev_fund"] = first_summary["prev_fund"]
+        aggregated_summary["fund_balance"] = last_summary["fund_balance"]
+        
+    aggregated_summary["external_rows"] = list(aggregated_external.values())
+    return list(aggregated_members.values()), aggregated_expenses, aggregated_incomes, aggregated_summary
+
+
+# --- TÍNH TOÁN HIỂN THỊ KẾT QUẢ TRẬN ĐẤU DỰA TRÊN LUẬT ---
+def get_match_money_value(score_a, score_b, match_money, rules):
+    if match_money is not None and not pd.isna(match_money):
+        return int(match_money)
+    if score_a == score_b:
+        return rules["fine_draw"]
+    if (score_a > score_b and score_b == 0) or (score_b > score_a and score_a == 0):
+        return rules["fine_lose_zero"]
+    return rules["fine_lose"]
+
+def get_match_collect_total(team_a1, team_a2, team_b1, team_b2, score_a, score_b, match_money, match_bet, rules):
+    money_each = get_match_money_value(score_a, score_b, match_money, rules)
+    team_a = [x for x in [team_a1, team_a2] if str(x or "").strip()]
+    team_b = [x for x in [team_b1, team_b2] if str(x or "").strip()]
+    try:
+        sa = int(score_a)
+        sb = int(score_b)
+    except Exception:
+        return 0
+    if sa == sb:
+        payers = len(team_a) + len(team_b)
+    elif sa > sb:
+        payers = len(team_b)
+    else:
+        payers = len(team_a)
+    try:
+        bet_value = int(match_bet or 0)
+    except Exception:
+        bet_value = 0
+    return (money_each + bet_value) * payers
+
+def get_result_text(score_a, score_b):
+    try:
+        sa = int(score_a)
+        sb = int(score_b)
+    except Exception:
+        return ""
+    if sa > sb:
+        return "Đội A thắng"
+    if sb > sa:
+        return "Đội B thắng"
+    return "Hòa"
+
 
 # --- EXCEL & PDF EXPORTERS ---
-def export_excel_bytes(db, month):
-    matches = db.fetch_matches(month)
+def export_excel_bytes(db, months):
+    matches = db.fetch_matches(months)
     df_matches = pd.DataFrame(matches, columns=[
-        "ID", "Ngày", "Số trận", "A1", "A2", "B1", "B2", "Điểm A", "Điểm B", "Phạt tự chọn", "Tiền độ", "Ghi chú"
+        "ID", "Ngày", "Trận số", "A1", "A2", "B1", "B2", "Điểm A", "Điểm B", "Phạt tự chọn", "Tiền độ", "Ghi chú"
     ])
     
-    stats = db.calculate_stats(month)
+    stats = db.calculate_stats(months)
     df_stats = pd.DataFrame(stats)
     if not df_stats.empty:
         df_stats["total_points"] = df_stats["wins"] * db.get_rules()["point_win"] + df_stats["draws"] * db.get_rules()["point_draw"]
@@ -859,7 +1023,7 @@ def export_excel_bytes(db, month):
             "money": "Tổng tiền", "total_points": "Điểm thành tích"
         })
     
-    rows, expenses, incomes, summary = db.calculate_finance_rows(month)
+    rows, expenses, incomes, summary = calculate_finance_period(db, months)
     df_members = pd.DataFrame(rows)
     if not df_members.empty:
         df_members = df_members.rename(columns={
@@ -899,7 +1063,7 @@ def export_excel_bytes(db, month):
     return output.getvalue()
 
 
-def export_pdf_bytes(db, month):
+def export_pdf_bytes(db, months):
     output = BytesIO()
     try:
         from reportlab.pdfbase import pdfmetrics
@@ -917,7 +1081,7 @@ def export_pdf_bytes(db, month):
     styles = getSampleStyleSheet()
     elements = []
     
-    title_text = f"Báo cáo Tennis Vui - Tháng {month}"
+    title_text = f"Báo cáo Tennis Vui - Chu kỳ: {', '.join(months)}"
     title = Paragraph(f"<font name='{font_name}'><b>{title_text}</b></font>", styles["Title"])
     elements.append(title)
     elements.append(Spacer(1, 12))
@@ -946,12 +1110,12 @@ def export_pdf_bytes(db, month):
         elements.append(tbl)
         elements.append(Spacer(1, 16))
         
-    matches = db.fetch_matches(month)
+    matches = db.fetch_matches(months)
     df_matches = pd.DataFrame(matches, columns=[
         "ID", "Ngày", "Trận số", "A1", "A2", "B1", "B2", "Điểm A", "Điểm B", "Phạt", "Độ", "Ghi chú"
     ])
     
-    stats = db.calculate_stats(month)
+    stats = db.calculate_stats(months)
     df_stats = pd.DataFrame(stats)
     if not df_stats.empty:
         df_stats["total_points"] = df_stats["wins"] * db.get_rules()["point_win"] + df_stats["draws"] * db.get_rules()["point_draw"]
@@ -962,7 +1126,7 @@ def export_pdf_bytes(db, month):
             "gf": "BT", "ga": "BT", "match_money": "Phạt", "bet_money": "Độ", "money": "Tổng"
         })
         
-    rows, expenses, incomes, summary = db.calculate_finance_rows(month)
+    rows, expenses, incomes, summary = calculate_finance_period(db, months)
     df_members = pd.DataFrame(rows)
     if not df_members.empty:
         df_members = df_members.rename(columns={
@@ -1162,20 +1326,20 @@ def save_editor_changes(db, table_name, editor_key, df_original):
                     cur.execute("UPDATE players SET name = ?, active = ?, weekly_sessions = ? WHERE id = ?", (name, active, weekly, row_id))
                 
                 elif table_name == "matches":
-                    money_val = row_data["Phạt tự chọn"]
+                    money_val = row_data["Tiền trận"]
                     match_money = int(money_val) if money_val is not None and not pd.isna(money_val) else None
                     bet_val = row_data["Tiền độ"]
                     match_bet = int(bet_val) if bet_val is not None and not pd.isna(bet_val) else 0
                     
                     data = {
                         "match_date": str(row_data["Ngày"]).strip(),
-                        "match_no": int(row_data["Trận số"]),
+                        "match_no": int(row_data["Trận"]),
                         "team_a1": str(row_data["A1"]).strip(),
                         "team_a2": str(row_data["A2"]).strip() if not pd.isna(row_data["A2"]) else "",
                         "team_b1": str(row_data["B1"]).strip(),
                         "team_b2": str(row_data["B2"]).strip() if not pd.isna(row_data["B2"]) else "",
-                        "score_a": int(row_data["Điểm A"]),
-                        "score_b": int(row_data["Điểm B"]),
+                        "score_a": int(row_data["A"]),
+                        "score_b": int(row_data["B"]),
                         "match_money": match_money,
                         "match_bet": match_bet,
                         "note": str(row_data["Ghi chú"]).strip() if not pd.isna(row_data["Ghi chú"]) else "",
@@ -1240,13 +1404,13 @@ def save_editor_changes(db, table_name, editor_key, df_original):
                     cur.execute("INSERT INTO players(name, active, weekly_sessions) VALUES (?, ?, ?)", (name, active, weekly))
                 
                 elif table_name == "matches":
-                    money_val = row_data.get("Phạt tự chọn")
+                    money_val = row_data.get("Tiền trận")
                     match_money = int(money_val) if money_val is not None and not pd.isna(money_val) else None
                     bet_val = row_data.get("Tiền độ")
                     match_bet = int(bet_val) if bet_val is not None and not pd.isna(bet_val) else 0
                     
                     match_date_val = str(row_data.get("Ngày", datetime.now().strftime("%Y-%m-%d"))).strip()
-                    match_no_val = row_data.get("Trận số")
+                    match_no_val = row_data.get("Trận")
                     if match_no_val is None or pd.isna(match_no_val):
                         max_no = cur.execute("SELECT COALESCE(MAX(match_no), 0) FROM matches WHERE match_date = ?", (match_date_val,)).fetchone()[0]
                         match_no = max_no + 1
@@ -1260,8 +1424,8 @@ def save_editor_changes(db, table_name, editor_key, df_original):
                         "team_a2": str(row_data.get("A2", "")).strip(),
                         "team_b1": str(row_data.get("B1", "")).strip(),
                         "team_b2": str(row_data.get("B2", "")).strip(),
-                        "score_a": int(row_data.get("Điểm A", 0)),
-                        "score_b": int(row_data.get("Điểm B", 0)),
+                        "score_a": int(row_data.get("A", 0)),
+                        "score_b": int(row_data.get("B", 0)),
                         "match_money": match_money,
                         "match_bet": match_bet,
                         "note": str(row_data.get("Ghi chú", "")).strip(),
@@ -1334,15 +1498,15 @@ st.markdown(
     }
     
     .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
+        gap: 8px;
     }
     
     .stTabs [data-baseweb="tab"] {
         background-color: #1e293b;
-        border-radius: 8px;
+        border-radius: 6px;
         color: #94a3b8;
         font-weight: 600;
-        padding: 10px 20px;
+        padding: 8px 16px;
         border: 1px solid #334155;
     }
     
@@ -1419,43 +1583,64 @@ selected_db = st.sidebar.selectbox(
     index=sorted(local_files).index(DEFAULT_DB_FILE) if DEFAULT_DB_FILE in local_files else 0
 )
 
-# Khởi tạo db kết nối
-def get_db(db_path):
-    return TennisDB(db_path)
+# Khởi tạo db kết nối (mỗi lần rerun sẽ mở kết nối riêng để tránh lỗi đa luồng)
+db = TennisDB(selected_db)
 
-db = get_db(selected_db)
-
-# --- TRÍCH XUẤT DANH SÁCH THÁNG ---
-def get_available_months():
+# --- TRÍCH XUẤT THÁNG, QUÝ, NĂM TỪ DATABASE ---
+def get_time_periods(db):
     cur = db.conn.cursor()
     months = set()
     try:
-        m_rows = cur.execute("SELECT DISTINCT substr(match_date, 1, 7) FROM matches").fetchall()
-        for r in m_rows:
-            if r[0]: months.add(r[0])
+        for r in cur.execute("SELECT DISTINCT substr(match_date, 1, 7) FROM matches").fetchall():
+            if r[0] and len(r[0]) == 7: months.add(r[0])
     except Exception: pass
     try:
-        e_rows = cur.execute("SELECT DISTINCT month FROM finance_expenses").fetchall()
-        for r in e_rows:
-            if r[0]: months.add(r[0])
+        for r in cur.execute("SELECT DISTINCT month FROM finance_expenses").fetchall():
+            if r[0] and len(r[0]) == 7: months.add(r[0])
     except Exception: pass
     try:
-        i_rows = cur.execute("SELECT DISTINCT month FROM finance_incomes").fetchall()
-        for r in i_rows:
-            if r[0]: months.add(r[0])
+        for r in cur.execute("SELECT DISTINCT month FROM finance_incomes").fetchall():
+            if r[0] and len(r[0]) == 7: months.add(r[0])
     except Exception: pass
     try:
-        f_rows = cur.execute("SELECT DISTINCT month FROM monthly_finance").fetchall()
-        for r in f_rows:
-            if r[0]: months.add(r[0])
+        for r in cur.execute("SELECT DISTINCT month FROM monthly_finance").fetchall():
+            if r[0] and len(r[0]) == 7: months.add(r[0])
     except Exception: pass
-    
+
     if not months:
         months.add(datetime.now().strftime("%Y-%m"))
-    return sorted(list(months), reverse=True)
+        
+    months_list = sorted(list(months), reverse=True)
+    
+    quarters = set()
+    years = set()
+    for m in months_list:
+        try:
+            y, mo = m.split("-")
+            years.add(y)
+            q = (int(mo) - 1) // 3 + 1
+            quarters.add(f"{y}-Q{q}")
+        except Exception:
+            pass
+            
+    return months_list, sorted(list(quarters), reverse=True), sorted(list(years), reverse=True)
 
-available_months = get_available_months()
-selected_month = st.sidebar.selectbox("Chọn tháng làm việc:", options=available_months)
+# Lựa chọn khoảng thời gian lọc dữ liệu
+period_type = st.sidebar.selectbox("Lọc dữ liệu theo:", ["Tháng", "Quý", "Năm"])
+months_list, quarters_list, years_list = get_time_periods(db)
+
+if period_type == "Tháng":
+    selected_period = st.sidebar.selectbox("Chọn tháng:", options=months_list)
+    months_to_query = [selected_period]
+elif period_type == "Quý":
+    selected_period = st.sidebar.selectbox("Chọn quý:", options=quarters_list)
+    y, q = selected_period.split("-Q")
+    q_num = int(q)
+    start_mo = (q_num - 1) * 3 + 1
+    months_to_query = [f"{y}-{mo:02d}" for mo in range(start_mo, start_mo + 3)]
+else:
+    selected_period = st.sidebar.selectbox("Chọn năm:", options=years_list)
+    months_to_query = [f"{selected_period}-{mo:02d}" for mo in range(1, 13)]
 
 # Nút sao lưu nhanh database
 if st.sidebar.button("💾 Sao lưu (Backup)"):
@@ -1465,150 +1650,125 @@ if st.sidebar.button("💾 Sao lưu (Backup)"):
 
 # Tiêu đề chính
 st.markdown(f'<div class="header-gradient">TENNIS VUI</div>', unsafe_allow_html=True)
-st.markdown(f"**Dữ liệu đang xem:** `{selected_db}` | **Tháng:** `{selected_month}`")
+st.markdown(f"**Dữ liệu đang xem:** `{selected_db}` | **Khoảng thời gian ({period_type}):** `{selected_period}`")
 
-# Tính toán các dòng tài chính của tháng hiện tại
-member_finance_rows, expenses, incomes, finance_summary = db.calculate_finance_rows(selected_month)
+# Tính toán các dòng tài chính của thời gian hiện tại
+member_finance_rows, expenses_list, incomes_list, finance_summary = calculate_finance_period(db, months_to_query)
 players_list = db.get_player_names()
+rules = db.get_rules()
 
-# --- THIẾT LẬP CÁC TAB CHÍNH ---
-tab_overview, tab_matches, tab_finance, tab_settlement, tab_config = st.tabs([
-    "🏠 TỔNG QUAN", 
-    "🏆 TRẬN ĐẤU & XẾP HẠNG", 
-    "💰 THU & CHI", 
-    "📊 QUYẾT TOÁN THÁNG", 
-    "👥 HỘI VIÊN & CẤU HÌNH"
+# --- THIẾT LẬP CÁC TAB CHÍNH (ĐÚNG THỨ TỰ BẢN GỐC) ---
+# 1. Nhập trận | 2. Bảng xếp hạng | 3. Bảng tiền trận | 4. Thống kê trận | 5. Thu chi tháng | 6. Dữ liệu
+tab_input_match, tab_rank, tab_money, tab_stats, tab_finance, tab_data = st.tabs([
+    "📝 Nhập trận", 
+    "🏆 Bảng xếp hạng", 
+    "💵 Bảng tiền trận", 
+    "📊 Thống kê trận", 
+    "💰 Thu chi tháng", 
+    "⚙️ Dữ liệu"
 ])
 
 # =========================================================
-# TAB 1: TỔNG QUAN (OVERVIEW)
+# TAB 1: NHẬP TRẬN (INPUT MATCH)
 # =========================================================
-with tab_overview:
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-title">Số dư quỹ lũy kế</div>
-                <div class="metric-value" style="color:#10b981;">{finance_summary['fund_balance']:,.0f} đ</div>
-                <div style="font-size:12px; color:#64748b;">Lũy kế cuối tháng {selected_month}</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-    with col2:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-title">Tổng thu quỹ trong tháng</div>
-                <div class="metric-value" style="color:#0ea5e9;">{finance_summary['total_income_fund']:,.0f} đ</div>
-                <div style="font-size:12px; color:#64748b;">Hội viên đóng + thu khác</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-    with col3:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-title">Tổng chi tiêu trong tháng</div>
-                <div class="metric-value" style="color:#f43f5e;">{finance_summary['total_expense']:,.0f} đ</div>
-                <div style="font-size:12px; color:#64748b;">Tiền sân, bóng, lượm banh...</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-    with col4:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-title">Thặng dư tháng</div>
-                <div class="metric-value" style="color:#eab308;">{finance_summary['fund_this_month']:,.0f} đ</div>
-                <div style="font-size:12px; color:#64748b;">Chênh lệch Thu - Chi tháng này</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-    st.write("---")
+with tab_input_match:
+    # Form thêm trận đấu mới nhanh (giống y hệt giao diện gốc)
+    st.subheader("Nhập kết quả trận đấu")
+    col_f1, col_f2, col_f3 = st.columns(3)
     
-    col_chart1, col_chart2 = st.columns(2)
-    with col_chart1:
-        st.subheader("📊 Chi tiết Cơ cấu Chi phí")
-        expense_data = {
-            "Khoản chi": ["Thuê sân", "Mua bóng", "Lượm banh", "Ăn uống", "Tiệc cuối tháng", "Khác"],
-            "Số tiền (đ)": [
-                finance_summary["court_total"],
-                finance_summary["ball_total"],
-                finance_summary["picker_total"],
-                finance_summary["meal_total"],
-                finance_summary["party_total"],
-                finance_summary["other_total"]
-            ]
-        }
-        df_exp = pd.DataFrame(expense_data)
-        df_exp = df_exp[df_exp["Số tiền (đ)"] > 0]
-        if not df_exp.empty:
-            st.bar_chart(df_exp.set_index("Khoản chi"), color="#f43f5e")
+    with col_f1:
+        match_date = st.date_input("Ngày thi đấu", value=datetime.now(), key="in_date")
+        
+        # Đội A selectbox
+        a1_select = st.selectbox("Đội A - Người 1", options=players_list + ["-- Nhập người ngoài --"], key="in_a1")
+        if a1_select == "-- Nhập người ngoài --":
+            a1 = st.text_input("Đội A - Nhập tên người ngoài 1", key="in_a1_custom").strip()
         else:
-            st.info("Chưa có dữ liệu chi phí nào cho tháng này.")
-
-    with col_chart2:
-        st.subheader("📈 Chi tiết nguồn Thu Quỹ")
-        income_data = {
-            "Khoản thu": ["Thu hội viên làm tròn", "Thu người ngoài", "Thu khác/Thu quỹ thủ công"],
-            "Số tiền (đ)": [
-                finance_summary["total_rounded_fee"],
-                finance_summary["external_income_total"],
-                finance_summary["other_income_total"]
-            ]
-        }
-        df_inc = pd.DataFrame(income_data)
-        df_inc = df_inc[df_inc["Số tiền (đ)"] > 0]
-        if not df_inc.empty:
-            st.bar_chart(df_inc.set_index("Khoản thu"), color="#0ea5e9")
-        else:
-            st.info("Chưa có dữ liệu thu quỹ nào cho tháng này.")
-
-
-# =========================================================
-# TAB 2: TRẬN ĐẤU & XẾP HẠNG (MATCHES & RANKINGS)
-# =========================================================
-with tab_matches:
-    subtab_rank, subtab_history = st.tabs(["🏆 BẢNG XẾP HẠNG", "📝 LỊCH SỬ TRẬN ĐẤU"])
-    
-    with subtab_rank:
-        st.subheader("Bảng xếp hạng thành tích & Tiền phạt")
-        stats_list = db.calculate_stats(selected_month)
-        if stats_list:
-            df_stats = pd.DataFrame(stats_list)
-            df_stats["total_points"] = df_stats["wins"] * db.get_rules()["point_win"] + df_stats["draws"] * db.get_rules()["point_draw"]
-            df_stats = df_stats.sort_values(by=["total_points", "wins", "gf"], ascending=[False, False, False])
-            df_stats.insert(0, "Hạng", range(1, len(df_stats) + 1))
+            a1 = a1_select
             
-            df_stats_display = df_stats.rename(columns={
-                "name": "Tên hội viên",
-                "matches": "Trận",
-                "wins": "Thắng",
-                "draws": "Hòa",
-                "losses": "Thua",
-                "gf": "Bàn thắng",
-                "ga": "Bàn thua",
-                "match_money": "Tiền phạt trận",
-                "bet_money": "Tiền độ",
-                "money": "Tổng tiền",
-                "total_points": "Điểm thành tích"
-            })
-            st.dataframe(df_stats_display.set_index("Hạng"), use_container_width=True)
+        a2_select = st.selectbox("Đội A - Người 2 (Đơn để trống)", options=["", "-- Nhập người ngoài --"] + players_list, key="in_a2")
+        if a2_select == "-- Nhập người ngoài --":
+            a2 = st.text_input("Đội A - Nhập tên người ngoài 2", key="in_a2_custom").strip()
         else:
-            st.info("Không có dữ liệu trận đấu cho tháng này để tính xếp hạng.")
-
-    with subtab_history:
+            a2 = a2_select
+            
+    with col_f2:
+        # Tự động tính trận số
+        d_str = match_date.strftime("%Y-%m-%d")
+        cur = db.conn.cursor()
+        max_no = cur.execute("SELECT COALESCE(MAX(match_no), 0) FROM matches WHERE match_date=?", (d_str,)).fetchone()[0]
+        match_no = st.number_input("Trận số", min_value=1, value=max_no + 1, key="in_no")
+        
+        # Đội B selectbox
+        b1_select = st.selectbox("Đội B - Người 1", options=players_list + ["-- Nhập người ngoài --"], key="in_b1")
+        if b1_select == "-- Nhập người ngoài --":
+            b1 = st.text_input("Đội B - Nhập tên người ngoài 1", key="in_b1_custom").strip()
+        else:
+            b1 = b1_select
+            
+        b2_select = st.selectbox("Đội B - Người 2 (Đơn để trống)", options=["", "-- Nhập người ngoài --"] + players_list, key="in_b2")
+        if b2_select == "-- Nhập người ngoài --":
+            b2 = st.text_input("Đội B - Nhập tên người ngoài 2", key="in_b2_custom").strip()
+        else:
+            b2 = b2_select
+            
+    with col_f3:
+        custom_fine = st.checkbox("Tiền phạt tự chọn", key="in_custom_fine")
+        match_money_val = None
+        if custom_fine:
+            match_money_val = st.number_input("Tiền trận (đ)", min_value=0, step=5000, value=20000, key="in_money")
+        else:
+            st.info("💡 Mặc định sử dụng Luật cấu hình")
+            
+        match_bet = st.number_input("Tiền độ (đ)", min_value=0, step=10000, value=0, key="in_bet")
+        
+        # Nhập tỷ số
+        col_sa, col_sb = st.columns(2)
+        with col_sa:
+            score_a = st.number_input("Tỷ số Đội A", min_value=0, max_value=7, value=0, key="in_score_a")
+        with col_sb:
+            score_b = st.number_input("Tỷ số Đội B", min_value=0, max_value=7, value=0, key="in_score_b")
+            
+    note = st.text_input("Ghi chú trận", key="in_note")
+    
+    col_btn1, col_btn2, _ = st.columns([1, 1, 6])
+    with col_btn1:
+        if st.button("Thêm trận", key="in_save_btn", type="primary"):
+            try:
+                data = {
+                    "match_date": d_str,
+                    "match_no": int(match_no),
+                    "team_a1": a1,
+                    "team_a2": a2 or "",
+                    "team_b1": b1,
+                    "team_b2": b2 or "",
+                    "score_a": int(score_a),
+                    "score_b": int(score_b),
+                    "match_money": match_money_val,
+                    "match_bet": int(match_bet),
+                    "note": note,
+                }
+                db.validate_match_data(data)
+                db.conn.execute(
+                    """
+                    INSERT INTO matches (match_date, match_no, team_a1, team_a2, team_b1, team_b2, score_a, score_b, match_money, created_at, match_bet, note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (data["match_date"], data["match_no"], data["team_a1"], data["team_a2"], data["team_b1"], data["team_b2"],
+                     data["score_a"], data["score_b"], data["match_money"], datetime.now().isoformat(timespec="seconds"), data["match_bet"], data["note"])
+                )
+                db.conn.commit()
+                st.success("Đã thêm trận đấu thành công!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Lỗi: {e}")
+                
+    with col_btn2:
         # File excel uploader to import matches
-        with st.expander("📥 NHẬP TRẬN ĐẤU TỪ EXCEL", expanded=False):
-            excel_file = st.file_uploader("Chọn tệp tin Excel (.xlsx)", type=["xlsx"])
+        with st.popover("📥 Nhập Excel"):
+            excel_file = st.file_uploader("Chọn tệp Excel (.xlsx)", type=["xlsx"])
             if excel_file is not None:
-                if st.button("Bắt đầu Nhập"):
+                if st.button("Bắt đầu Nhập từ Excel"):
                     success, msg = import_excel_data(excel_file, db)
                     if success:
                         st.success(msg)
@@ -1616,147 +1776,176 @@ with tab_matches:
                     else:
                         st.error(msg)
                         
-        # Form thêm trận đấu mới nhanh
-        with st.expander("➕ THÊM TRẬN ĐẤU NHANH", expanded=False):
-            if not players_list:
-                st.warning("Vui lòng thêm hội viên trước.")
-            else:
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    st.markdown("**Đội A**")
-                    a1_select = st.selectbox("Người chơi A1", options=players_list + ["-- Nhập người ngoài --"], key="fast_a1")
-                    if a1_select == "-- Nhập người ngoài --":
-                        a1 = st.text_input("Nhập tên người ngoài A1", key="fast_a1_custom").strip()
-                    else:
-                        a1 = a1_select
-                        
-                    a2_select = st.selectbox("Người chơi A2 (Đơn để trống)", options=["", "-- Nhập người ngoài --"] + players_list, key="fast_a2")
-                    if a2_select == "-- Nhập người ngoài --":
-                        a2 = st.text_input("Nhập tên người ngoài A2", key="fast_a2_custom").strip()
-                    else:
-                        a2 = a2_select
-                        
-                    score_a = st.number_input("Tỷ số Đội A", min_value=0, max_value=7, value=0, key="fast_score_a")
-                
-                with col_b:
-                    st.markdown("**Đội B**")
-                    b1_select = st.selectbox("Người chơi B1", options=players_list + ["-- Nhập người ngoài --"], key="fast_b1")
-                    if b1_select == "-- Nhập người ngoài --":
-                        b1 = st.text_input("Nhập tên người ngoài B1", key="fast_b1_custom").strip()
-                    else:
-                        b1 = b1_select
-                        
-                    b2_select = st.selectbox("Người chơi B2 (Đơn để trống)", options=["", "-- Nhập người ngoài --"] + players_list, key="fast_b2")
-                    if b2_select == "-- Nhập người ngoài --":
-                        b2 = st.text_input("Nhập tên người ngoài B2", key="fast_b2_custom").strip()
-                    else:
-                        b2 = b2_select
-                        
-                    score_b = st.number_input("Tỷ số Đội B", min_value=0, max_value=7, value=0, key="fast_score_b")
-                
-                col_info1, col_info2, col_info3 = st.columns(3)
-                with col_info1:
-                    match_date = st.date_input("Ngày đấu", value=datetime.now(), key="fast_date")
-                with col_info2:
-                    match_bet = st.number_input("Tiền độ (đ)", min_value=0, step=10000, value=0, key="fast_bet")
-                with col_info3:
-                    custom_fine = st.checkbox("Sử dụng tiền phạt tự chọn", key="fast_custom_fine")
-                    match_money = None
-                    if custom_fine:
-                        match_money = st.number_input("Nhập tiền phạt tự chọn (đ)", min_value=0, step=5000, value=20000, key="fast_money")
-                
-                note = st.text_input("Ghi chú trận đấu", key="fast_note")
-                
-                if st.button("Lưu trận đấu", key="fast_save_btn"):
-                    try:
-                        d_str = match_date.strftime("%Y-%m-%d")
-                        cur = db.conn.cursor()
-                        max_no = cur.execute("SELECT COALESCE(MAX(match_no), 0) FROM matches WHERE match_date=?", (d_str,)).fetchone()[0]
-                        
-                        data = {
-                            "match_date": d_str,
-                            "match_no": max_no + 1,
-                            "team_a1": a1,
-                            "team_a2": a2 or "",
-                            "team_b1": b1,
-                            "team_b2": b2 or "",
-                            "score_a": score_a,
-                            "score_b": score_b,
-                            "match_money": match_money,
-                            "match_bet": match_bet,
-                            "note": note,
-                        }
-                        db.validate_match_data(data)
-                        db.conn.execute(
-                            """
-                            INSERT INTO matches (match_date, match_no, team_a1, team_a2, team_b1, team_b2, score_a, score_b, match_money, created_at, match_bet, note)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (data["match_date"], data["match_no"], data["team_a1"], data["team_a2"], data["team_b1"], data["team_b2"],
-                             data["score_a"], data["score_b"], data["match_money"], datetime.now().isoformat(timespec="seconds"), data["match_bet"], data["note"])
-                        )
-                        db.conn.commit()
-                        st.success("Đã thêm trận đấu thành công!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Lỗi: {e}")
+    st.write("---")
 
-        # Bảng chỉnh sửa inline lịch sử trận đấu
-        st.subheader("Bảng chỉnh sửa Lịch sử trận đấu")
-        matches_raw = db.fetch_matches(selected_month)
-        if matches_raw:
-            df_matches = pd.DataFrame(matches_raw, columns=[
-                "ID", "Ngày", "Trận số", "A1", "A2", "B1", "B2", "Điểm A", "Điểm B", "Phạt tự chọn", "Tiền độ", "Ghi chú"
-            ])
-            
-            # Cho phép chỉnh sửa bảng trực tiếp
-            edited_matches_df = st.data_editor(
-                df_matches,
-                num_rows="dynamic",
-                key="matches_editor",
-                column_config={
-                    "ID": st.column_config.NumberColumn("ID", disabled=True),
-                    "Ngày": st.column_config.TextColumn("Ngày"),
-                    "Trận số": st.column_config.NumberColumn("Trận số"),
-                    "A1": st.column_config.TextColumn("A1"),
-                    "A2": st.column_config.TextColumn("A2"),
-                    "B1": st.column_config.TextColumn("B1"),
-                    "B2": st.column_config.TextColumn("B2"),
-                    "Điểm A": st.column_config.NumberColumn("Điểm A", min_value=0, max_value=7),
-                    "Điểm B": st.column_config.NumberColumn("Điểm B", min_value=0, max_value=7),
-                    "Phạt tự chọn": st.column_config.NumberColumn("Phạt tự chọn"),
-                    "Tiền độ": st.column_config.NumberColumn("Tiền độ"),
-                    "Ghi chú": st.column_config.TextColumn("Ghi chú")
-                },
-                use_container_width=True
-            )
-            
-            col_save1, col_save2 = st.columns([1, 5])
-            with col_save1:
-                if st.button("Lưu thay đổi trận đấu", type="primary"):
-                    success, msg = save_editor_changes(db, "matches", "matches_editor", df_matches)
-                    if success:
-                        st.success(msg)
-                        st.rerun()
-                    else:
-                        st.error(msg)
-            with col_save2:
-                st.info("💡 Bạn có thể chỉnh sửa trực tiếp, thêm dòng cuối bảng hoặc xoá các dòng bằng cách tick chọn cột bên trái rồi nhấn phím Delete trên bàn phím. Sau đó nhấn 'Lưu thay đổi'.")
-        else:
-            st.info("Chưa có trận đấu nào được lưu trong tháng này.")
+    # Lưới chỉnh sửa matches
+    st.subheader("Danh sách kết quả trận đấu")
+    matches_raw = db.fetch_matches(months_to_query)
+    if matches_raw:
+        # Chuẩn bị Dataframe phù hợp hiển thị bản gốc
+        df_matches = pd.DataFrame(matches_raw, columns=[
+            "ID", "Ngày", "Trận", "A1", "A2", "B1", "B2", "A", "B", "Tiền trận", "Tiền độ", "Ghi chú"
+        ])
+        
+        # Sắp xếp lại cột để giống Treeview gốc
+        df_matches = df_matches[["ID", "Ngày", "Trận", "A1", "A2", "A", "B", "B1", "B2", "Tiền trận", "Tiền độ", "Ghi chú"]]
+        
+        # Tính toán các cột động hiển thị
+        df_matches["Tiền thu trận"] = df_matches.apply(
+            lambda r: get_match_collect_total(r["A1"], r["A2"], r["B1"], r["B2"], r["A"], r["B"], r["Tiền trận"], r["Tiền độ"], rules), axis=1
+        )
+        df_matches["Kết quả"] = df_matches.apply(
+            lambda r: get_result_text(r["A"], r["B"]), axis=1
+        )
+        
+        # Sắp xếp thứ tự cột hiển thị
+        cols_order = ["ID", "Ngày", "Trận", "A1", "A2", "A", "B", "B1", "B2", "Tiền trận", "Tiền độ", "Tiền thu trận", "Kết quả", "Ghi chú"]
+        df_matches = df_matches[cols_order]
+        
+        edited_matches_df = st.data_editor(
+            df_matches,
+            num_rows="dynamic",
+            key="matches_editor",
+            column_config={
+                "ID": st.column_config.NumberColumn("ID", disabled=True),
+                "Ngày": st.column_config.TextColumn("Ngày"),
+                "Trận": st.column_config.NumberColumn("Trận"),
+                "A1": st.column_config.TextColumn("A1"),
+                "A2": st.column_config.TextColumn("A2"),
+                "A": st.column_config.NumberColumn("A", min_value=0, max_value=7),
+                "B": st.column_config.NumberColumn("B", min_value=0, max_value=7),
+                "B1": st.column_config.TextColumn("B1"),
+                "B2": st.column_config.TextColumn("B2"),
+                "Tiền trận": st.column_config.NumberColumn("Tiền trận"),
+                "Tiền độ": st.column_config.NumberColumn("Tiền độ"),
+                "Tiền thu trận": st.column_config.NumberColumn("Tiền thu trận", disabled=True),
+                "Kết quả": st.column_config.TextColumn("Kết quả", disabled=True),
+                "Ghi chú": st.column_config.TextColumn("Ghi chú")
+            },
+            use_container_width=True
+        )
+        
+        if st.button("Lưu thay đổi trận đấu", type="primary"):
+            success, msg = save_editor_changes(db, "matches", "matches_editor", df_matches)
+            if success:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+    else:
+        st.info("Chưa có trận đấu nào được lưu trong khoảng thời gian này.")
 
 
 # =========================================================
-# TAB 3: QUẢN LÝ THU & CHI (FINANCE INCOMES & EXPENSES)
+# TAB 2: BẢNG XẾP HẠNG (RANKINGS)
+# =========================================================
+with tab_rank:
+    st.subheader("Bảng xếp hạng thành tích")
+    stats_list = db.calculate_stats(months_to_query)
+    if stats_list:
+        df_stats = pd.DataFrame(stats_list)
+        df_stats["total_points"] = df_stats["wins"] * rules["point_win"] + df_stats["draws"] * rules["point_draw"]
+        df_stats = df_stats.sort_values(by=["total_points", "wins", "gf"], ascending=[False, False, False])
+        df_stats.insert(0, "Hạng", range(1, len(df_stats) + 1))
+        
+        df_stats_display = df_stats.rename(columns={
+            "name": "Tên hội viên",
+            "matches": "Trận",
+            "wins": "Thắng",
+            "draws": "Hòa",
+            "losses": "Thua",
+            "gf": "Bàn thắng",
+            "ga": "Bàn thua",
+            "match_money": "Tiền phạt trận",
+            "bet_money": "Tiền độ",
+            "money": "Tổng tiền",
+            "total_points": "Điểm thành tích"
+        })
+        st.dataframe(df_stats_display.set_index("Hạng"), use_container_width=True)
+    else:
+        st.info("Chưa có dữ liệu xếp hạng.")
+
+
+# =========================================================
+# TAB 3: BẢNG TIỀN TRẬN (FINES DETAIL)
+# =========================================================
+with tab_money:
+    st.subheader("Chi tiết tiền phạt trận & Tiền độ hội viên")
+    money_detail = db.get_period_match_money_detail_map(months_to_query)
+    if money_detail:
+        money_rows = []
+        for name, data in money_detail.items():
+            money_rows.append({
+                "Tên hội viên": name,
+                "Tiền phạt trận (đ)": data["match_money"],
+                "Tiền độ (đ)": data["bet_money"],
+                "Tổng cộng (đ)": data["total"]
+            })
+        df_money = pd.DataFrame(money_rows)
+        df_money = df_money.sort_values(by="Tổng cộng (đ)", ascending=False)
+        st.dataframe(df_money.set_index("Tên hội viên"), use_container_width=True)
+    else:
+        st.info("Không có phát sinh tiền phạt hoặc tiền độ trong thời gian này.")
+
+
+# =========================================================
+# TAB 4: THỐNG KÊ TRẬN (STATS OVERVIEW)
+# =========================================================
+with tab_stats:
+    st.subheader("Thống kê số liệu giải đấu")
+    matches_raw = db.fetch_matches(months_to_query)
+    if matches_raw:
+        # Số liệu tóm tắt
+        total_matches = len(matches_raw)
+        total_collected = sum(
+            get_match_collect_total(m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], rules)
+            for m in matches_raw
+        )
+        total_bets = sum(int(m[10] or 0) for m in matches_raw)
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Tổng số trận đấu", f"{total_matches} trận")
+        c2.metric("Tổng tiền thu từ trận", f"{total_collected:,.0f} đ")
+        c3.metric("Tổng tiền độ phát sinh", f"{total_bets:,.0f} đ")
+        
+        st.write("---")
+        st.subheader("Danh sách tất cả trận đấu trong kỳ")
+        
+        # Hiển thị list tĩnh đẹp đẽ để xem
+        df_view = pd.DataFrame(matches_raw, columns=[
+            "ID", "Ngày", "Trận số", "A1", "A2", "B1", "B2", "Điểm A", "Điểm B", "Phạt tự chọn", "Tiền độ", "Ghi chú"
+        ])
+        df_view["Đội A"] = df_view.apply(lambda r: f"{r['A1']} + {r['A2']}" if r['A2'] else r['A1'], axis=1)
+        df_view["Đội B"] = df_view.apply(lambda r: f"{r['B1']} + {r['B2']}" if r['B2'] else r['B1'], axis=1)
+        df_view["Tỷ số"] = df_view.apply(lambda r: f"{r['Điểm A']} - {r['Điểm B']}", axis=1)
+        
+        df_display_list = df_view[["ID", "Ngày", "Trận số", "Đội A", "Tỷ số", "Đội B", "Phạt tự chọn", "Tiền độ", "Ghi chú"]]
+        st.dataframe(df_display_list.set_index("ID"), use_container_width=True)
+    else:
+        st.info("Chưa có trận đấu nào trong thời gian này.")
+
+
+# =========================================================
+# TAB 5: THU CHI THÁNG (MONTHLY FINANCE & SETTLEMENT)
 # =========================================================
 with tab_finance:
-    subtab_expense, subtab_income = st.tabs(["💸 PHẦN CHI (EXPENSES)", "📥 PHẦN THU (INCOMES)"])
+    st.subheader("Thẻ Tổng Hợp Tài Chính Quỹ")
     
-    with subtab_expense:
-        # Bảng chỉnh sửa chi phí
-        st.subheader("Bảng chỉnh sửa chi tiết các khoản chi quỹ")
-        if expenses:
-            df_expenses = pd.DataFrame(expenses, columns=["ID", "Ngày chi", "Loại chi phí", "Số tiền (đ)", "Người tham gia", "Người trả", "Ghi chú"])
+    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+    col_f1.metric("Số dư quỹ lũy kế cuối kỳ", f"{finance_summary['fund_balance']:,.0f} đ")
+    col_f2.metric("Tổng thu quỹ trong kỳ", f"{finance_summary['total_income_fund']:,.0f} đ")
+    col_f3.metric("Tổng chi tiêu quỹ", f"{finance_summary['total_expense']:,.0f} đ")
+    col_f4.metric("Thặng dư tích lũy kỳ", f"{finance_summary['fund_this_month']:,.0f} đ")
+    
+    st.write("---")
+    
+    # Grid điều chỉnh thu chi
+    subtab_exp, subtab_inc, subtab_set = st.tabs(["💸 Các khoản CHI (Expenses)", "📥 Các khoản THU (Incomes)", "📊 Bảng Quyết Toán Tài Chính"])
+    
+    with subtab_exp:
+        st.subheader("Điều chỉnh chi tiết các khoản chi")
+        if expenses_list:
+            df_expenses = pd.DataFrame(expenses_list, columns=["ID", "Ngày chi", "Loại chi phí", "Số tiền (đ)", "Người tham gia", "Người trả", "Ghi chú"])
             df_expenses["Người tham gia"] = df_expenses["Người tham gia"].apply(lambda x: ", ".join(load_json_list(x)) if "All" not in load_json_list(x) else "All")
             
             edited_exp_df = st.data_editor(
@@ -1775,7 +1964,7 @@ with tab_finance:
                 use_container_width=True
             )
             
-            if st.button("Lưu thay đổi khoản chi", type="primary"):
+            if st.button("Lưu thay đổi khoản chi", type="primary", key="save_exp_btn"):
                 success, msg = save_editor_changes(db, "finance_expenses", "expenses_editor", df_expenses)
                 if success:
                     st.success(msg)
@@ -1783,23 +1972,12 @@ with tab_finance:
                 else:
                     st.error(msg)
         else:
-            st.info("Chưa có khoản chi nào trong tháng này. Bạn có thể thêm dòng trực tiếp ở lưới trống dưới đây.")
-            # Tạo DF trống để cho phép thêm dòng
-            df_empty = pd.DataFrame(columns=["ID", "Ngày chi", "Loại chi phí", "Số tiền (đ)", "Người tham gia", "Người trả", "Ghi chú"])
-            st.data_editor(df_empty, num_rows="dynamic", key="expenses_editor", use_container_width=True)
-            if st.button("Lưu thay đổi khoản chi", type="primary"):
-                success, msg = save_editor_changes(db, "finance_expenses", "expenses_editor", df_empty)
-                if success:
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
+            st.info("Chưa phát sinh chi phí.")
 
-    with subtab_income:
-        # Bảng chỉnh sửa khoản thu
-        st.subheader("Bảng chỉnh sửa chi tiết các khoản thu quỹ")
-        if incomes:
-            df_incomes = pd.DataFrame(incomes, columns=["ID", "Ngày thu", "Loại khoản thu", "Số tiền (đ)", "Người thu", "Ghi chú"])
+    with subtab_inc:
+        st.subheader("Điều chỉnh chi tiết các khoản thu")
+        if incomes_list:
+            df_incomes = pd.DataFrame(incomes_list, columns=["ID", "Ngày thu", "Loại khoản thu", "Số tiền (đ)", "Người thu", "Ghi chú"])
             
             edited_inc_df = st.data_editor(
                 df_incomes,
@@ -1816,7 +1994,7 @@ with tab_finance:
                 use_container_width=True
             )
             
-            if st.button("Lưu thay đổi khoản thu", type="primary"):
+            if st.button("Lưu thay đổi khoản thu", type="primary", key="save_inc_btn"):
                 success, msg = save_editor_changes(db, "finance_incomes", "incomes_editor", df_incomes)
                 if success:
                     st.success(msg)
@@ -1824,123 +2002,65 @@ with tab_finance:
                 else:
                     st.error(msg)
         else:
-            st.info("Chưa có khoản thu nào trong tháng này. Bạn có thể thêm dòng trực tiếp ở lưới trống dưới đây.")
-            df_empty = pd.DataFrame(columns=["ID", "Ngày thu", "Loại khoản thu", "Số tiền (đ)", "Người thu", "Ghi chú"])
-            st.data_editor(df_empty, num_rows="dynamic", key="incomes_editor", use_container_width=True)
-            if st.button("Lưu thay đổi khoản thu", type="primary"):
-                success, msg = save_editor_changes(db, "finance_incomes", "incomes_editor", df_empty)
-                if success:
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
+            st.info("Chưa phát sinh khoản thu.")
+
+    with subtab_set:
+        st.subheader("Báo cáo quyết toán chi tiết")
+        col_dl1, col_dl2 = st.columns(2)
+        with col_dl1:
+            excel_data = export_excel_bytes(db, months_to_query)
+            st.download_button(
+                label="📥 Tải Báo cáo Excel đầy đủ",
+                data=excel_data,
+                file_name=f"Bao_cao_Tennis_{selected_period}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        with col_dl2:
+            pdf_data = export_pdf_bytes(db, months_to_query)
+            st.download_button(
+                label="📥 Tải Báo cáo PDF",
+                data=pdf_data,
+                file_name=f"Bao_cao_Tennis_{selected_period}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+            
+        st.write("---")
+        st.markdown("#### 1. Quyết toán Hội viên")
+        if member_finance_rows:
+            df_mem_fin = pd.DataFrame(member_finance_rows)
+            df_mem_fin_display = df_mem_fin.rename(columns={
+                "name": "Hội viên", "weekly": "Buổi/Tuần", "court": "Tiền sân", "ball_picker": "Bóng + Nhặt",
+                "meal": "Ăn uống", "other_charge": "Chi khác", "match_money": "Tiền phạt", "bet_money": "Tiền độ",
+                "calc_fee": "Phí thực tính", "rounded_fee": "Phí làm tròn", "paid_by_member": "Đã chi hộ",
+                "collected_by_member": "Đã thu hộ", "net_payable": "Cần thu (Thu tháng)"
+            })
+            cols_to_show = ["Hội viên", "Buổi/Tuần", "Tiền sân", "Bóng + Nhặt", "Ăn uống", "Chi khác", "Tiền phạt", "Tiền độ", "Phí thực tính", "Phí làm tròn", "Đã chi hộ", "Đã thu hộ", "Cần thu (Thu tháng)"]
+            st.dataframe(df_mem_fin_display[cols_to_show].set_index("Hội viên"), use_container_width=True)
+            
+        st.write("---")
+        st.markdown("#### 2. Quyết toán Người ngoài / Khách vãng lai")
+        ext_rows = finance_summary["external_rows"]
+        if ext_rows:
+            df_ext = pd.DataFrame(ext_rows)
+            df_ext_display = df_ext.rename(columns={
+                "name": "Họ và tên", "meal": "Tiền ăn uống", "other": "Khoản chi khác",
+                "paid_by_external": "Đã chi hộ", "collected_by_external": "Đã thu hộ", "net_payable": "Cần thu/trả lại"
+            })
+            st.dataframe(df_ext_display.set_index("Họ và tên"), use_container_width=True)
+        else:
+            st.info("Không phát sinh quyết toán của người ngoài.")
 
 
 # =========================================================
-# TAB 4: BẢNG QUYẾT TOÁN THÁNG (SETTLEMENT & REPORTS)
+# TAB 6: DỮ LIỆU (DATA & CONFIGURATION)
 # =========================================================
-with tab_settlement:
-    st.subheader(f"Báo cáo Quyết toán chi tiết - Tháng {selected_month}")
-    
-    # Nút tải báo cáo Excel và PDF
-    col_dl1, col_dl2 = st.columns(2)
-    with col_dl1:
-        # Xuất file Excel đa dạng sheet
-        excel_data = export_excel_bytes(db, selected_month)
-        st.download_button(
-            label="📥 Tải xuống Báo cáo Excel đầy đủ (6 sheets)",
-            data=excel_data,
-            file_name=f"Quyet_toan_Tennis_{selected_month}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
-    with col_dl2:
-        # Xuất file PDF bằng reportlab
-        pdf_data = export_pdf_bytes(db, selected_month)
-        st.download_button(
-            label="📥 Tải xuống Báo cáo PDF",
-            data=pdf_data,
-            file_name=f"Bao_cao_Tennis_{selected_month}.pdf",
-            mime="application/pdf",
-            use_container_width=True
-        )
-    
-    st.write("---")
-
-    # Bảng hội viên chính thức
-    st.markdown("#### 1. Phần Hội viên chính thức")
-    if member_finance_rows:
-        df_mem_fin = pd.DataFrame(member_finance_rows)
-        df_mem_fin_display = df_mem_fin.rename(columns={
-            "name": "Hội viên",
-            "weekly": "Buổi/Tuần",
-            "court": "Tiền sân",
-            "ball_picker": "Bóng + Nhặt",
-            "meal": "Ăn uống",
-            "other_charge": "Chi khác",
-            "match_money": "Tiền phạt",
-            "bet_money": "Tiền độ",
-            "calc_fee": "Phí thực tính",
-            "rounded_fee": "Phí làm tròn",
-            "paid_by_member": "Đã chi hộ",
-            "collected_by_member": "Đã thu hộ",
-            "net_payable": "Thu tháng (Cần đóng)"
-        })
-        cols_to_show = ["Hội viên", "Buổi/Tuần", "Tiền sân", "Bóng + Nhặt", "Ăn uống", "Chi khác", "Tiền phạt", "Tiền độ", "Phí thực tính", "Phí làm tròn", "Đã chi hộ", "Đã thu hộ", "Thu tháng (Cần đóng)"]
-        st.dataframe(df_mem_fin_display[cols_to_show].set_index("Hội viên"), use_container_width=True)
-    else:
-        st.info("Chưa có danh sách hội viên trong tháng.")
-
-    # Bảng người ngoài vãng lai
-    st.write("---")
-    st.markdown("#### 2. Phần Người ngoài / Vãng lai")
-    ext_rows = finance_summary["external_rows"]
-    if ext_rows:
-        df_ext = pd.DataFrame(ext_rows)
-        df_ext_display = df_ext.rename(columns={
-            "name": "Họ và tên",
-            "meal": "Tiền ăn uống",
-            "other": "Khoản chi khác",
-            "paid_by_external": "Đã chi hộ",
-            "collected_by_external": "Đã thu hộ",
-            "net_payable": "Cần thu/trả lại"
-        })
-        st.dataframe(df_ext_display.set_index("Họ và tên"), use_container_width=True)
-    else:
-        st.info("Không phát sinh khoản thu chi nào của người ngoài trong tháng này.")
-
-    # Phần tổng hợp dòng tiền cuối tháng
-    st.write("---")
-    st.markdown("#### 3. Bảng tổng hợp quỹ cuối kỳ")
-    col_sum1, col_sum2 = st.columns(2)
-    with col_sum1:
-        st.markdown(
-            f"""
-            - **Số dư quỹ tháng trước chuyển sang:** `{finance_summary['prev_fund']:,.0f} đ`
-            - **Tổng thu quỹ trong tháng này:** `{finance_summary['total_income_fund']:,.0f} đ`
-                - Trong đó thu hội viên làm tròn: `{finance_summary['total_rounded_fee']:,.0f} đ`
-                - Thu người ngoài vãng lai: `{finance_summary['external_income_total']:,.0f} đ`
-                - Thu ngoài khác: `{finance_summary['other_income_total']:,.0f} đ`
-            """
-        )
-    with col_sum2:
-        st.markdown(
-            f"""
-            - **Tổng chi tiêu của quỹ trong tháng:** `{finance_summary['total_expense']:,.0f} đ`
-            - **Thặng dư tích lũy cuối tháng này:** `{finance_summary['fund_balance']:,.0f} đ`
-            - **Tiền dư ra do làm tròn 10k:** `{finance_summary['round_extra']:,.0f} đ`
-            """
-        )
-
-
-# =========================================================
-# TAB 5: HỘI VIÊN & CẤU HÌNH (MEMBERS & CONFIGURATION)
-# =========================================================
-with tab_config:
-    subtab_members, subtab_rules = st.tabs(["👥 DANH SÁCH HỘI VIÊN", "⚙️ LUẬT & CẤU HÌNH"])
+with tab_data:
+    subtab_members, subtab_rules = st.tabs(["👥 Danh sách Hội Viên", "⚙️ Luật & Thủ Quỹ"])
     
     with subtab_members:
-        st.subheader("Bảng quản lý hội viên chính thức")
+        st.subheader("Danh sách hội viên đang hoạt động")
         cur = db.conn.cursor()
         raw_players = cur.execute("SELECT id, name, active, weekly_sessions FROM players ORDER BY name").fetchall()
         
@@ -1960,7 +2080,7 @@ with tab_config:
             use_container_width=True
         )
         
-        if st.button("Lưu thay đổi hội viên", type="primary"):
+        if st.button("Lưu thay đổi hội viên", type="primary", key="save_players_btn"):
             success, msg = save_editor_changes(db, "players", "players_editor", df_players)
             if success:
                 st.success(msg)
@@ -1970,34 +2090,35 @@ with tab_config:
 
     with subtab_rules:
         st.subheader("Cấu hình mức phạt & Tính điểm")
-        current_rules = db.get_rules()
         
-        rule_lose = st.number_input("Tiền phạt khi thua trận (đ):", value=current_rules["fine_lose"], step=5000)
-        rule_draw = st.number_input("Tiền phạt khi hòa trận (đ):", value=current_rules["fine_draw"], step=5000)
-        rule_zero = st.number_input("Tiền phạt khi thua trắng 0 bàn (đ):", value=current_rules["fine_lose_zero"], step=5000)
+        rule_lose = st.number_input("Tiền phạt khi thua trận (đ):", value=rules["fine_lose"], step=5000)
+        rule_draw = st.number_input("Tiền phạt khi hòa trận (đ):", value=rules["fine_draw"], step=5000)
+        rule_zero = st.number_input("Tiền phạt khi thua trắng 0 bàn (đ):", value=rules["fine_lose_zero"], step=5000)
         
-        rule_pt_win = st.number_input("Điểm cộng khi Thắng:", value=current_rules["point_win"], step=1)
-        rule_pt_draw = st.number_input("Điểm cộng khi Hòa:", value=current_rules["point_draw"], step=1)
-        rule_pt_loss = st.number_input("Điểm cộng khi Thua:", value=current_rules["point_loss"], step=1)
+        rule_pt_win = st.number_input("Điểm cộng khi Thắng:", value=rules["point_win"], step=1)
+        rule_pt_draw = st.number_input("Điểm cộng khi Hòa:", value=rules["point_draw"], step=1)
+        rule_pt_loss = st.number_input("Điểm cộng khi Thua:", value=rules["point_loss"], step=1)
         
-        # Cấu hình người gom quỹ tự động
         st.write("---")
         st.subheader("Thiết lập thủ quỹ tự động thu")
         players_names = db.get_player_names()
         
+        # Dùng tháng cuối cùng trong kỳ truy vấn để lưu/đọc thiết lập thủ quỹ
+        target_month = months_to_query[-1]
+        
         auto_collector_rounded = st.selectbox(
             "Người thu hộ tiền hội viên làm tròn:",
             options=["Quỹ"] + players_names,
-            index=(["Quỹ"] + players_names).index(db.get_auto_income_collector(AUTO_ROUNDED_MEMBER_INCOME, selected_month))
+            index=(["Quỹ"] + players_names).index(db.get_auto_income_collector(AUTO_ROUNDED_MEMBER_INCOME, target_month))
         )
         
         auto_collector_external = st.selectbox(
             "Người thu hộ tiền người ngoài vãng lai:",
             options=["Quỹ"] + players_names,
-            index=(["Quỹ"] + players_names).index(db.get_auto_income_collector(AUTO_EXTERNAL_INCOME, selected_month))
+            index=(["Quỹ"] + players_names).index(db.get_auto_income_collector(AUTO_EXTERNAL_INCOME, target_month))
         )
 
-        if st.button("Lưu cấu hình"):
+        if st.button("Lưu cấu hình", key="save_rules_btn"):
             new_rules = {
                 "fine_lose": rule_lose,
                 "fine_draw": rule_draw,
@@ -2008,14 +2129,13 @@ with tab_config:
             }
             db.save_rules(new_rules)
             
-            # Lưu thủ quỹ tự động
             db.conn.execute(
                 "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
-                (f"auto_income_collector::{selected_month}::{AUTO_ROUNDED_MEMBER_INCOME}", auto_collector_rounded)
+                (f"auto_income_collector::{target_month}::{AUTO_ROUNDED_MEMBER_INCOME}", auto_collector_rounded)
             )
             db.conn.execute(
                 "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
-                (f"auto_income_collector::{selected_month}::{AUTO_EXTERNAL_INCOME}", auto_collector_external)
+                (f"auto_income_collector::{target_month}::{AUTO_EXTERNAL_INCOME}", auto_collector_external)
             )
             db.conn.commit()
             
