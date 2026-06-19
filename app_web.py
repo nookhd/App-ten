@@ -1625,14 +1625,34 @@ with tab_matches:
                 col_a, col_b = st.columns(2)
                 with col_a:
                     st.markdown("**Đội A**")
-                    a1 = st.selectbox("Người chơi A1", options=players_list, key="fast_a1")
-                    a2 = st.selectbox("Người chơi A2 (Đơn để trống)", options=[""] + players_list, key="fast_a2")
+                    a1_select = st.selectbox("Người chơi A1", options=players_list + ["-- Nhập người ngoài --"], key="fast_a1")
+                    if a1_select == "-- Nhập người ngoài --":
+                        a1 = st.text_input("Nhập tên người ngoài A1", key="fast_a1_custom").strip()
+                    else:
+                        a1 = a1_select
+                        
+                    a2_select = st.selectbox("Người chơi A2 (Đơn để trống)", options=["", "-- Nhập người ngoài --"] + players_list, key="fast_a2")
+                    if a2_select == "-- Nhập người ngoài --":
+                        a2 = st.text_input("Nhập tên người ngoài A2", key="fast_a2_custom").strip()
+                    else:
+                        a2 = a2_select
+                        
                     score_a = st.number_input("Tỷ số Đội A", min_value=0, max_value=7, value=0, key="fast_score_a")
                 
                 with col_b:
                     st.markdown("**Đội B**")
-                    b1 = st.selectbox("Người chơi B1", options=players_list, key="fast_b1")
-                    b2 = st.selectbox("Người chơi B2 (Đơn để trống)", options=[""] + players_list, key="fast_b2")
+                    b1_select = st.selectbox("Người chơi B1", options=players_list + ["-- Nhập người ngoài --"], key="fast_b1")
+                    if b1_select == "-- Nhập người ngoài --":
+                        b1 = st.text_input("Nhập tên người ngoài B1", key="fast_b1_custom").strip()
+                    else:
+                        b1 = b1_select
+                        
+                    b2_select = st.selectbox("Người chơi B2 (Đơn để trống)", options=["", "-- Nhập người ngoài --"] + players_list, key="fast_b2")
+                    if b2_select == "-- Nhập người ngoài --":
+                        b2 = st.text_input("Nhập tên người ngoài B2", key="fast_b2_custom").strip()
+                    else:
+                        b2 = b2_select
+                        
                     score_b = st.number_input("Tỷ số Đội B", min_value=0, max_value=7, value=0, key="fast_score_b")
                 
                 col_info1, col_info2, col_info3 = st.columns(3)
@@ -1699,10 +1719,10 @@ with tab_matches:
                     "ID": st.column_config.NumberColumn("ID", disabled=True),
                     "Ngày": st.column_config.TextColumn("Ngày"),
                     "Trận số": st.column_config.NumberColumn("Trận số"),
-                    "A1": st.column_config.SelectboxColumn("A1", options=players_list),
-                    "A2": st.column_config.SelectboxColumn("A2", options=[""] + players_list),
-                    "B1": st.column_config.SelectboxColumn("B1", options=players_list),
-                    "B2": st.column_config.SelectboxColumn("B2", options=[""] + players_list),
+                    "A1": st.column_config.TextColumn("A1"),
+                    "A2": st.column_config.TextColumn("A2"),
+                    "B1": st.column_config.TextColumn("B1"),
+                    "B2": st.column_config.TextColumn("B2"),
                     "Điểm A": st.column_config.NumberColumn("Điểm A", min_value=0, max_value=7),
                     "Điểm B": st.column_config.NumberColumn("Điểm B", min_value=0, max_value=7),
                     "Phạt tự chọn": st.column_config.NumberColumn("Phạt tự chọn"),
@@ -1750,7 +1770,7 @@ with tab_finance:
                     "Loại chi phí": st.column_config.SelectboxColumn("Loại chi phí", options=EXPENSE_TYPES),
                     "Số tiền (đ)": st.column_config.NumberColumn("Số tiền (đ)"),
                     "Người tham gia": st.column_config.TextColumn("Người tham gia"),
-                    "Người trả": st.column_config.SelectboxColumn("Người trả", options=["Quỹ"] + players_list),
+                    "Người trả": st.column_config.TextColumn("Người trả"),
                     "Ghi chú": st.column_config.TextColumn("Ghi chú")
                 },
                 use_container_width=True
@@ -1791,7 +1811,7 @@ with tab_finance:
                     "Ngày thu": st.column_config.TextColumn("Ngày thu"),
                     "Loại khoản thu": st.column_config.SelectboxColumn("Loại khoản thu", options=DEFAULT_INCOME_TYPES),
                     "Số tiền (đ)": st.column_config.NumberColumn("Số tiền (đ)"),
-                    "Người thu": st.column_config.SelectboxColumn("Người thu", options=["Quỹ"] + players_list),
+                    "Người thu": st.column_config.TextColumn("Người thu"),
                     "Ghi chú": st.column_config.TextColumn("Ghi chú")
                 },
                 use_container_width=True
