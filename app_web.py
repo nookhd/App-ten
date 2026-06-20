@@ -387,6 +387,8 @@ class TennisDB:
         return {normalize_text_key(name) for name in LEGACY_FUND_ENTITY_NAMES}
 
     def get_auto_income_collector(self, income_type, month):
+        if income_type in AUTO_INCOME_TYPES:
+            return FUND_ENTITY_NAME
         key = f"auto_income_collector::{month}::{income_type}"
         try:
             row = self.conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
@@ -929,8 +931,16 @@ class TennisDB:
                 + r.get("collected_by_member", 0)
             )
 
+        # Load initial fund from settings
+        key_inf = f"initial_fund::{month}"
+        try:
+            row_inf = self.conn.execute("SELECT value FROM settings WHERE key = ?", (key_inf,)).fetchone()
+            initial_fund = int(row_inf[0]) if row_inf and row_inf[0] else 0
+        except Exception:
+            initial_fund = 0
+
         # Update fund balance in monthly_finance table
-        prev_fund = self.get_previous_month_fund(month)
+        prev_fund = self.get_previous_month_fund(month) + initial_fund
         fund_balance = prev_fund + fund_this_month
         cur.execute(
             "UPDATE monthly_finance SET court_cost=?, ball_cost=?, picker_cost=?, fund_balance=? WHERE month=?",
@@ -2304,6 +2314,36 @@ with tab_finance:
     col_f3.metric("Tổng chi tiêu quỹ", f"{finance_summary['total_expense']:,.0f}")
     col_f4.metric("Thặng dư tích lũy kỳ", f"{finance_summary['fund_this_month']:,.0f}")
     
+    # Quản lý Quỹ ban đầu cho tháng đầu tiên của kỳ đang chọn
+    first_month = sorted(months_to_query)[0]
+    key_inf_first = f"initial_fund::{first_month}"
+    row_inf_first = db.conn.execute("SELECT value FROM settings WHERE key = ?", (key_inf_first,)).fetchone()
+    initial_fund_first = int(row_inf_first[0]) if row_inf_first and row_inf_first[0] else 0
+
+    col_sub1, col_sub2, col_sub3 = st.columns([1.5, 1.5, 3])
+    with col_sub1:
+        st.metric("Quỹ tháng trước", f"{finance_summary['prev_fund'] - initial_fund_first:,.0f}")
+    with col_sub2:
+        if len(months_to_query) == 1:
+            new_initial_fund = st.number_input(
+                "Quỹ ban đầu",
+                value=initial_fund_first,
+                step=10000,
+                key="initial_fund_input"
+            )
+            if new_initial_fund != initial_fund_first:
+                db.conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (key_inf_first, str(int(new_initial_fund))))
+                db.conn.commit()
+                st.rerun()
+        else:
+            st.number_input(
+                f"Quỹ ban đầu ({first_month})",
+                value=initial_fund_first,
+                disabled=True,
+                help="Chọn xem theo từng tháng đơn lẻ để sửa Quỹ ban đầu",
+                key="initial_fund_input_disabled"
+            )
+            
     st.write("---")
     
     # Grid điều chỉnh thu chi
